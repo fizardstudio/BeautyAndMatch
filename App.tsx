@@ -13,20 +13,13 @@ import {
   Platform,
 } from 'react-native';
 import { requireNativeComponent } from 'react-native';
-const FizgravityARView = requireNativeComponent('FizgravityARView');
+const FizgravityARView = requireNativeComponent<any>('FizgravityARView');
 
 import {
+  Camera,
+  useCameraDevice,
   useCameraPermission,
 } from 'react-native-vision-camera';
-import {
-  Canvas,
-  Skia,
-  Shader,
-  Path,
-  Points,
-  ColorShader,
-  PathOp,
-} from '@shopify/react-native-skia';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -156,352 +149,49 @@ function AppContent() {
   const [isScanning, setIsScanning] = useState(false);
 
   // Shared values for the face tracking mesh & animations (accepts flat Float32Array)
-  const landmarksSV = useSharedValue<any>([]);
   const scanLineY = useSharedValue(-50);
   const scanOpacity = useSharedValue(0);
   const isProcessing = useSharedValue(false);
   const frameCounter = useSharedValue(0); // Frame counter for throttling
 
-  // Frame aspect ratio derived dynamically (landscape width / height, e.g. 4/3 or 16/9)
-  const frameAspectRatio = useSharedValue(4 / 3);
-  const displayWidth = screenWidth;
-  const displayHeight = useDerivedValue(() => screenWidth * frameAspectRatio.value);
-  const offsetY = useDerivedValue(() => (screenHeight - displayHeight.value) / 2);
+  const hexToRGBA = (hex: string, alpha: number) => {
+    if (!hex || hex === '#00000000' || hex === 'transparent') {
+      return [0, 0, 0, 0];
+    }
+    try {
+      let r = parseInt(hex.slice(1, 3), 16) / 255;
+      let g = parseInt(hex.slice(3, 5), 16) / 255;
+      let b = parseInt(hex.slice(5, 7), 16) / 255;
+      return [r, g, b, alpha];
+    } catch (e) {
+      return [0, 0, 0, 0];
+    }
+  };
+
+  const screenAspect = screenHeight / screenWidth;
+  const cameraAspect = 16.0 / 9.0;
+  let scaleX = 1.0;
+  let scaleY = 1.0;
+  
+  if (screenAspect > cameraAspect) {
+    scaleX = screenAspect / cameraAspect;
+  } else {
+    scaleY = cameraAspect / screenAspect;
+  }
 
   const mapX = (x: number) => {
     'worklet';
-    return (1 - x) * displayWidth;
+    // Native coordinate system is already mirrored and rotated
+    return ((x - 0.5) * scaleX + 0.5) * screenWidth;
   };
   const mapY = (y: number) => {
     'worklet';
-    return (y * displayHeight.value) + offsetY.value;
+    return ((y - 0.5) * scaleY + 0.5) * screenHeight;
   };
 
   // Diagnostic values ref to hold frame results before applying AI mode
   const latestDiagnostics = useRef<Diagnostics | null>(null);
  
-  const updateStateJS = useRunOnJS((flatLandmarks: any, diag?: Diagnostics) => {
-    landmarksSV.value = flatLandmarks;
-    if (diag) { latestDiagnostics.current = diag; }
-  });
-
-  // Compile shaders safely
-  const foundationEffect = useMemo(() => {
-    try {
-      return Skia.RuntimeEffect.Make(foundationShaderCode);
-    } catch (e) {
-      console.error('Foundation Shader Error:', e);
-      return null;
-    }
-  }, []);
-
-  const contourEffect = useMemo(() => {
-    try {
-      return Skia.RuntimeEffect.Make(contourShaderCode);
-    } catch (e) {
-      console.error('Contour Shader Error:', e);
-      return null;
-    }
-  }, []);
-
-  const lipstickEffect = useMemo(() => {
-    try {
-      return Skia.RuntimeEffect.Make(lipstickShaderCode);
-    } catch (e) {
-      console.error('Lipstick Shader Error:', e);
-      return null;
-    }
-  }, []);
-
-  const eyeEffect = useMemo(() => {
-    try {
-      return Skia.RuntimeEffect.Make(eyeShaderCode);
-    } catch (e) {
-      console.error('Eye Shader Error:', e);
-      return null;
-    }
-  }, []);
-
-
-
-  // Derived Paths for Makeup Overlays (Skia)
-  const faceSkinPath = useDerivedValue(() => {
-    const path = Skia.Path.Make();
-    const landmarks = landmarksSV.value;
-    if (!landmarks || landmarks.length < 468 * 3) return path;
-
-    // Face Silhouette Outline
-    const silhouette = [
-      10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377,
-      152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109
-    ];
-
-    const p0 = getLandmark(landmarks, silhouette[0]);
-    path.moveTo(mapX(p0.x), mapY(p0.y));
-    for (let i = 1; i < silhouette.length; i++) {
-      const p = getLandmark(landmarks, silhouette[i]);
-      path.lineTo(mapX(p.x), mapY(p.y));
-    }
-    path.close();
-
-    // Subtract Eyes to prevent blurring details
-    const leftEyeIdx = [33, 160, 158, 133, 153, 144];
-    const pLE = getLandmark(landmarks, leftEyeIdx[0]);
-    const leftEyePath = Skia.Path.Make();
-    leftEyePath.moveTo(mapX(pLE.x), mapY(pLE.y));
-    for (let i = 1; i < leftEyeIdx.length; i++) {
-      const p = getLandmark(landmarks, leftEyeIdx[i]);
-      leftEyePath.lineTo(mapX(p.x), mapY(p.y));
-    }
-    leftEyePath.close();
-    path.op(leftEyePath, PathOp.Difference);
-
-    const rightEyeIdx = [362, 385, 387, 263, 373, 380];
-    const pRE = getLandmark(landmarks, rightEyeIdx[0]);
-    const rightEyePath = Skia.Path.Make();
-    rightEyePath.moveTo(mapX(pRE.x), mapY(pRE.y));
-    for (let i = 1; i < rightEyeIdx.length; i++) {
-      const p = getLandmark(landmarks, rightEyeIdx[i]);
-      rightEyePath.lineTo(mapX(p.x), mapY(p.y));
-    }
-    rightEyePath.close();
-    path.op(rightEyePath, PathOp.Difference);
-
-    // Subtract Lips
-    const lipsIdx = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146];
-    const pLip = getLandmark(landmarks, lipsIdx[0]);
-    const lipsPath = Skia.Path.Make();
-    lipsPath.moveTo(mapX(pLip.x), mapY(pLip.y));
-    for (let i = 1; i < lipsIdx.length; i++) {
-      const p = getLandmark(landmarks, lipsIdx[i]);
-      lipsPath.lineTo(mapX(p.x), mapY(p.y));
-    }
-    lipsPath.close();
-    path.op(lipsPath, PathOp.Difference);
-
-    return path;
-  });
-
-  const lipsPath = useDerivedValue(() => {
-    const path = Skia.Path.Make();
-    const landmarks = landmarksSV.value;
-    if (!landmarks || landmarks.length < 180 * 3) return path;
-
-    const outerIndices = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146];
-    const p0 = getLandmark(landmarks, outerIndices[0]);
-    path.moveTo(mapX(p0.x), mapY(p0.y));
-    for (let i = 1; i < outerIndices.length; i++) {
-      const p = getLandmark(landmarks, outerIndices[i]);
-      path.lineTo(mapX(p.x), mapY(p.y));
-    }
-    path.close();
-    return path;
-  });
-
-  const leftBlushPath = useDerivedValue(() => {
-    const path = Skia.Path.Make();
-    const landmarks = landmarksSV.value;
-    if (!landmarks || landmarks.length < 350 * 3) return path;
-
-    const p117 = getLandmark(landmarks, 117);
-    const cx = mapX(p117.x);
-    const cy = mapY(p117.y);
-    const faceW = calculateDistance(getLandmark(landmarks, 234), getLandmark(landmarks, 454)) * screenWidth;
-
-    const rx = faceW * 0.12;
-    const ry = faceW * 0.10;
-
-    path.addOval({ x: cx - rx, y: cy - ry, width: rx * 2, height: ry * 2 });
-
-    // Apply Style Rotation
-    if (blushStyle === 'contour_45') {
-      const m = Skia.Matrix();
-      m.translate(cx, cy);
-      m.rotate(-Math.PI / 4);
-      m.scale(1.6, 0.8);
-      m.translate(-cx, -cy);
-      path.transform(m);
-    } else if (blushStyle === 'horizontal') {
-      const m = Skia.Matrix();
-      m.translate(cx, cy);
-      m.scale(1.4, 0.9);
-      m.translate(-cx, -cy);
-      path.transform(m);
-    }
-    return path;
-  });
-
-  const rightBlushPath = useDerivedValue(() => {
-    const path = Skia.Path.Make();
-    const landmarks = landmarksSV.value;
-    if (!landmarks || landmarks.length < 350 * 3) return path;
-
-    const p346 = getLandmark(landmarks, 346);
-    const cx = mapX(p346.x);
-    const cy = mapY(p346.y);
-    const faceW = calculateDistance(getLandmark(landmarks, 234), getLandmark(landmarks, 454)) * screenWidth;
-
-    const rx = faceW * 0.12;
-    const ry = faceW * 0.10;
-
-    path.addOval({ x: cx - rx, y: cy - ry, width: rx * 2, height: ry * 2 });
-
-    // Apply Style Rotation
-    if (blushStyle === 'contour_45') {
-      const m = Skia.Matrix();
-      m.translate(cx, cy);
-      m.rotate(Math.PI / 4);
-      m.scale(1.6, 0.8);
-      m.translate(-cx, -cy);
-      path.transform(m);
-    } else if (blushStyle === 'horizontal') {
-      const m = Skia.Matrix();
-      m.translate(cx, cy);
-      m.scale(1.4, 0.9);
-      m.translate(-cx, -cy);
-      path.transform(m);
-    }
-    return path;
-  });
-
-  const cheekContourPath = useDerivedValue(() => {
-    const path = Skia.Path.Make();
-    const landmarks = landmarksSV.value;
-    if (!landmarks || landmarks.length < 362 * 3) return path;
-
-    const p127 = getLandmark(landmarks, 127);
-    const p111 = getLandmark(landmarks, 111);
-    const p116 = getLandmark(landmarks, 116);
-    const p356 = getLandmark(landmarks, 356);
-    const p340 = getLandmark(landmarks, 340);
-    const p345 = getLandmark(landmarks, 345);
-
-    // Left cheek contour hollow
-    path.moveTo(mapX(p127.x), mapY(p127.y));
-    path.lineTo(mapX(p111.x), mapY(p111.y));
-    path.lineTo(mapX(p116.x), mapY(p116.y));
-    path.close();
-
-    // Right cheek contour hollow
-    path.moveTo(mapX(p356.x), mapY(p356.y));
-    path.lineTo(mapX(p340.x), mapY(p340.y));
-    path.lineTo(mapX(p345.x), mapY(p345.y));
-    path.close();
-
-    // Jaw slimming
-    if (contourStyle === 'slim') {
-      const p132 = getLandmark(landmarks, 132);
-      const p152 = getLandmark(landmarks, 152);
-      const p172 = getLandmark(landmarks, 172);
-      const p361 = getLandmark(landmarks, 361);
-      const p397 = getLandmark(landmarks, 397);
-
-      path.moveTo(mapX(p132.x), mapY(p132.y));
-      path.lineTo(mapX(p152.x), mapY(p152.y));
-      path.lineTo(mapX(p172.x), mapY(p172.y));
-      path.close();
-
-      path.moveTo(mapX(p361.x), mapY(p361.y));
-      path.lineTo(mapX(p152.x), mapY(p152.y));
-      path.lineTo(mapX(p397.x), mapY(p397.y));
-      path.close();
-    }
-    return path;
-  });
-
-  const noseContourPath = useDerivedValue(() => {
-    const path = Skia.Path.Make();
-    const landmarks = landmarksSV.value;
-    if (!landmarks || landmarks.length < 200 * 3) return path;
-
-    const faceW = calculateDistance(getLandmark(landmarks, 234), getLandmark(landmarks, 454)) * screenWidth;
-
-    let offset = faceW * 0.025;
-    if (contourStyle === 'pinch') {
-      offset = faceW * 0.015;
-    }
-
-    const pTop = getLandmark(landmarks, 168);
-    const pTip = getLandmark(landmarks, 2);
-
-    let xTopL = pTop.x;
-    let xTipL = pTip.x;
-    let xTopR = pTop.x;
-    let xTipR = pTip.x;
-
-    if (contourStyle === 'straight') {
-      xTipL = pTop.x;
-      xTipR = pTop.x;
-    }
-
-    // Left Nose Contouring Line
-    path.moveTo(mapX(xTopL) - offset, mapY(pTop.y));
-    path.lineTo(mapX(xTipL) - offset, mapY(pTip.y));
-
-    // Right Nose Contouring Line
-    path.moveTo(mapX(xTopR) + offset, mapY(pTop.y));
-    path.lineTo(mapX(xTipR) + offset, mapY(pTip.y));
-
-    return path;
-  });
-
-  const leftEyePath = useDerivedValue(() => {
-    const path = Skia.Path.Make();
-    const landmarks = landmarksSV.value;
-    if (!landmarks || landmarks.length < 350 * 3) return path;
-    
-    // Draw an eyeshadow arc right above the upper eyelid
-    const eyeTopIdx = [33, 246, 161, 160, 159, 158, 157, 173, 133];
-    const p0 = getLandmark(landmarks, eyeTopIdx[0]);
-    path.moveTo(mapX(p0.x), mapY(p0.y));
-    for(let i = 1; i < eyeTopIdx.length; i++) {
-        const p = getLandmark(landmarks, eyeTopIdx[i]);
-        path.lineTo(mapX(p.x), mapY(p.y));
-    }
-    const p133 = getLandmark(landmarks, 133);
-    const p159 = getLandmark(landmarks, 159);
-    const p33 = getLandmark(landmarks, 33);
-    path.lineTo(mapX(p133.x), mapY(p133.y) - 20);
-    path.lineTo(mapX(p159.x), mapY(p159.y) - 30);
-    path.lineTo(mapX(p33.x), mapY(p33.y) - 15);
-    path.close();
-    return path;
-  });
-
-  const rightEyePath = useDerivedValue(() => {
-    const path = Skia.Path.Make();
-    const landmarks = landmarksSV.value;
-    if (!landmarks || landmarks.length < 400 * 3) return path;
-    
-    const eyeTopIdx = [362, 398, 384, 385, 386, 387, 388, 466, 263];
-    const p0 = getLandmark(landmarks, eyeTopIdx[0]);
-    path.moveTo(mapX(p0.x), mapY(p0.y));
-    for(let i = 1; i < eyeTopIdx.length; i++) {
-        const p = getLandmark(landmarks, eyeTopIdx[i]);
-        path.lineTo(mapX(p.x), mapY(p.y));
-    }
-    const p263 = getLandmark(landmarks, 263);
-    const p386 = getLandmark(landmarks, 386);
-    const p362 = getLandmark(landmarks, 362);
-    path.lineTo(mapX(p263.x), mapY(p263.y) - 15);
-    path.lineTo(mapX(p386.x), mapY(p386.y) - 30);
-    path.lineTo(mapX(p362.x), mapY(p362.y) - 20);
-    path.close();
-    return path;
-  });
-
-  // Shader Uniforms Removed
-
-  const skPoints = useDerivedValue(() => {
-    const landmarks = landmarksSV.value;
-    if (!landmarks || landmarks.length === 0) return [];
-    const points = [];
-    for (let i = 0; i < landmarks.length; i += 3) {
-      points.push(Skia.Point(mapX(landmarks[i]), mapY(landmarks[i + 1])));
-    }
-    return points;
-  });
-
   // AI Diagnostic Scanning sequence
   const startAIScan = () => {
     setIsScanning(true);
@@ -570,60 +260,12 @@ function AppContent() {
       {/* 1. Hardware Camera Feed (Native OpenGL ES 3.0) */}
       <FizgravityARView
         style={StyleSheet.absoluteFill}
-        onFaceDetected={(event: any) => {
-          const { landmarks, diagnostics, frameWidth, frameHeight } = event.nativeEvent;
-          if (landmarks && landmarks.length > 0) {
-            if (frameWidth && frameHeight) {
-              frameAspectRatio.value = frameWidth / frameHeight;
-            }
-            updateStateJS(landmarks, diagnostics);
-          } else {
-            updateStateJS([], undefined);
-          }
-        }}
+        makeupLipstick={hexToRGBA(lipstickColor, lipstickOpacity * 0.6)}
+        makeupBlush={hexToRGBA(blushColor, blushOpacity * 0.5)}
+        makeupFoundation={hexToRGBA(foundationColor, foundationOpacity * 0.3)}
+        makeupEyeshadow={hexToRGBA(eyeshadowColor, eyeshadowOpacity * 0.5)}
+        makeupContour={hexToRGBA(contourColor, contourIntensity * 0.4)}
       />
-
-      {/* 2. Skia GPU Graphics Shaders Overlay */}
-      <Canvas style={StyleSheet.absoluteFill} pointerEvents="none">
-        {/* Flawless Foundation */}
-        {foundationOpacity > 0 && (
-          <Path path={faceSkinPath} color={foundationColor} opacity={foundationOpacity * 0.3} style="fill" />
-        )}
-
-        {/* Blush */}
-        {blushOpacity > 0 && (
-          <>
-            <Path path={leftBlushPath} color={blushColor} opacity={blushOpacity * 0.5} style="fill" />
-            <Path path={rightBlushPath} color={blushColor} opacity={blushOpacity * 0.5} style="fill" />
-          </>
-        )}
-
-        {/* Face Contouring & Highlighting */}
-        {contourIntensity > 0 && (
-          <>
-            <Path path={cheekContourPath} color={contourColor} opacity={contourIntensity * 0.4} style="fill" />
-            <Path path={noseContourPath} color={contourColor} opacity={contourIntensity * 0.3} strokeWidth={8} style="stroke" strokeCap="round" />
-          </>
-        )}
-
-        {/* Glossy Lipstick */}
-        {lipstickOpacity > 0 && (
-          <Path path={lipsPath} color={lipstickColor} opacity={lipstickOpacity * 0.6} style="fill" />
-        )}
-
-        {/* Eyeliner & Eyeshadow */}
-        {eyeshadowOpacity > 0 && (
-          <>
-            <Path path={leftEyePath} color={eyeshadowColor} opacity={eyeshadowOpacity * 0.5} style="fill" />
-            <Path path={rightEyePath} color={eyeshadowColor} opacity={eyeshadowOpacity * 0.5} style="fill" />
-          </>
-        )}
-
-        {/* 478 green landmark mesh tracking dots */}
-        {showMesh && (
-          <Points points={skPoints} mode="points" strokeWidth={3} color="#00FFCC" />
-        )}
-      </Canvas>
 
       {/* 3. AI Scan Laser Line Overlay */}
       <Animated.View style={[styles.scanLine, scanLineStyle]} />
@@ -690,7 +332,20 @@ function AppContent() {
           {/* Sub-panel Content */}
           <View style={styles.drawersContent}>
             {activeTab === 'complexion' && (
-              <ScrollView>
+              <ScrollView contentContainerStyle={styles.controlsContent} showsVerticalScrollIndicator={false}>
+                <ColorPicker
+                  label="Foundation Shade"
+                  colors={['#00000000', '#F6C3A2', '#EBB48F', '#F0C7AC', '#DF9B72', '#C68257']}
+                  selectedColor={foundationColor}
+                  onSelect={(color) => setFoundation({ foundationColor: color })}
+                />
+                <GlassSlider
+                  label="Coverage"
+                  min={0}
+                  max={1}
+                  value={foundationOpacity}
+                  onChange={(val) => setFoundation({ foundationOpacity: val })}
+                />
                 <GlassSlider
                   label="Foundation Smooth (Blur)"
                   min={0}
@@ -698,31 +353,18 @@ function AppContent() {
                   value={foundationBlur}
                   onChange={(val) => setFoundation({ foundationBlur: val })}
                 />
-                <GlassSlider
-                  label="Foundation Opacity"
-                  min={0}
-                  max={1}
-                  value={foundationOpacity}
-                  onChange={(val) => setFoundation({ foundationOpacity: val })}
-                />
-                <ColorPicker
-                  label="Foundation Shade"
-                  colors={['#F6C3A2', '#EBB48F', '#F0C7AC', '#DF9B72', '#C68257']}
-                  selectedColor={foundationColor}
-                  onSelect={(color) => setFoundation({ foundationColor: color })}
-                />
               </ScrollView>
             )}
 
             {activeTab === 'blush' && (
               <ScrollView>
-                <GlassSlider
-                  label="Blush Opacity"
-                  min={0}
-                  max={1}
-                  value={blushOpacity}
-                  onChange={(val) => setBlush({ blushOpacity: val })}
-                />
+                <ColorPicker
+                    label="Blush Tint"
+                    colors={['#00000000', '#E2725B', '#D87093', '#F4C2C2', '#FF8C00', '#C0392B']}
+                    selectedColor={blushColor}
+                    onSelect={(color) => setBlush({ blushColor: color })}
+                  />
+                <GlassSlider label="Intensity" min={0} max={1} value={blushOpacity} onChange={(val) => setBlush({ blushOpacity: val })} />
                 <View style={styles.styleSelector}>
                   <Text style={styles.selectorLabel}>Application Pattern</Text>
                   <View style={styles.optionsRow}>
@@ -731,17 +373,17 @@ function AppContent() {
                     <OptionButton title="Horizontal" selected={blushStyle === 'horizontal'} onPress={() => setBlush({ blushStyle: 'horizontal' })} />
                   </View>
                 </View>
-                <ColorPicker
-                  label="Blush Tint"
-                  colors={['#E2725B', '#D87093', '#F4C2C2', '#FF8C00', '#C0392B']}
-                  selectedColor={blushColor}
-                  onSelect={(color) => setBlush({ blushColor: color })}
-                />
               </ScrollView>
             )}
 
             {activeTab === 'contour' && (
               <ScrollView>
+                <ColorPicker
+                  label="Contour Shade"
+                  colors={['#00000000', '#6B4D3C', '#5C4033', '#4A3525', '#8A6D5E', '#A08070']}
+                  selectedColor={contourColor}
+                  onSelect={(color) => setContour({ contourColor: color })}
+                />
                 <GlassSlider
                   label="Contour Intensity"
                   min={0}
@@ -758,42 +400,30 @@ function AppContent() {
                     <OptionButton title="Straighten" selected={contourStyle === 'straight'} onPress={() => setContour({ contourStyle: 'straight' })} />
                   </View>
                 </View>
-                <ColorPicker
-                  label="Sculpt Color"
-                  colors={['#6B4D3C', '#5C4033', '#4A3525', '#8A6D5E', '#A08070']}
-                  selectedColor={contourColor}
-                  onSelect={(color) => setContour({ contourColor: color })}
-                />
               </ScrollView>
             )}
 
             {activeTab === 'lips' && (
-              <ScrollView>
-                <GlassSlider
-                  label="Lipstick Opacity"
-                  min={0}
-                  max={1}
-                  value={lipstickOpacity}
-                  onChange={(val) => setLipstick({ lipstickOpacity: val })}
-                />
-                <GlassSlider
-                  label="Glossiness Highlight"
-                  min={0}
-                  max={1}
-                  value={lipstickGlossiness}
-                  onChange={(val) => setLipstick({ lipstickGlossiness: val })}
-                />
-                <ColorPicker
-                  label="Lip Tint"
-                  colors={['#D35400', '#C0392B', '#E74C3C', '#9B59B6', '#E91E63', '#FF4081']}
-                  selectedColor={lipstickColor}
-                  onSelect={(color) => setLipstick({ lipstickColor: color })}
-                />
+              <ScrollView contentContainerStyle={styles.controlsContent} showsVerticalScrollIndicator={false}>
+                  <ColorPicker
+                    label="Lip Tint"
+                    colors={['#00000000', '#D35400', '#C0392B', '#E74C3C', '#9B59B6', '#E91E63', '#FF4081']}
+                    selectedColor={lipstickColor}
+                    onSelect={(color) => setLipstick({ lipstickColor: color })}
+                  />
+                  <GlassSlider label="Opacity" min={0} max={1} value={lipstickOpacity} onChange={(val) => setLipstick({ lipstickOpacity: val })} />
+                  <GlassSlider label="Glossiness" min={0} max={1} value={lipstickGlossiness} onChange={(val) => setLipstick({ lipstickGlossiness: val })} />
               </ScrollView>
             )}
 
             {activeTab === 'eyes' && (
               <ScrollView>
+                <ColorPicker
+                    label="Eyeshadow Shade"
+                    colors={['#00000000', '#5D4037', '#4A3B32', '#8A3324', '#B08D57', '#C19A6B', '#3E2723']}
+                    selectedColor={eyeshadowColor}
+                    onSelect={(color) => setEyeshadow({ eyeshadowColor: color })}
+                  />
                 <GlassSlider
                   label="Eyeshadow Opacity"
                   min={0}
@@ -810,12 +440,6 @@ function AppContent() {
                     <OptionButton title="Halo" selected={eyeshadowStyle === 'halo'} onPress={() => setEyeshadow({ eyeshadowStyle: 'halo' })} />
                   </View>
                 </View>
-                <ColorPicker
-                  label="Eyeshadow Shade"
-                  colors={['#5D4037', '#4A3B32', '#8A3324', '#B08D57', '#C19A6B', '#3E2723']}
-                  selectedColor={eyeshadowColor}
-                  onSelect={(color) => setEyeshadow({ eyeshadowColor: color })}
-                />
               </ScrollView>
             )}
 
@@ -926,17 +550,23 @@ const ColorPicker: React.FC<ColorPickerProps> = ({ label, colors, selectedColor,
   <View style={styles.colorPickerContainer}>
     <Text style={styles.colorPickerLabel}>{label}</Text>
     <View style={styles.colorsRow}>
-      {colors.map((color) => (
-        <TouchableOpacity
-          key={color}
-          style={[
-            styles.colorCircle,
-            { backgroundColor: color },
-            selectedColor.toLowerCase() === color.toLowerCase() && styles.selectedColorCircle,
-          ]}
-          onPress={() => onSelect(color)}
-        />
-      ))}
+      {colors.map((color) => {
+        const isTransparent = color === '#00000000';
+        return (
+          <TouchableOpacity
+            key={color}
+            style={[
+              styles.colorCircle,
+              { backgroundColor: isTransparent ? 'rgba(255,255,255,0.1)' : color },
+              selectedColor.toLowerCase() === color.toLowerCase() && styles.selectedColorCircle,
+              isTransparent && { borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)', borderStyle: 'dashed', justifyContent: 'center', alignItems: 'center' }
+            ]}
+            onPress={() => onSelect(color)}
+          >
+            {isTransparent && <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 14, fontWeight: 'bold' }}>X</Text>}
+          </TouchableOpacity>
+        );
+      })}
     </View>
   </View>
 );
