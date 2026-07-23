@@ -1,4 +1,6 @@
-#include <jni.h>
+import os
+
+cpp_code = """#include <jni.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <GLES3/gl3.h>
@@ -41,7 +43,7 @@ static const char* MASK_VERTEX_SHADER = R"(
     void main() {
         float x = (aPosition.x * 2.0 - 1.0) * uScale.x + uOffset.x;
         float y = (1.0 - aPosition.y * 2.0) * uScale.y + uOffset.y;
-        gl_Position = vec4(x, y, aPosition.z, 1.0);
+        gl_Position = vec4(x, y, 0.0, 1.0);
         vColor = aColor;
     }
 )";
@@ -157,18 +159,16 @@ GLuint createProgram(const char* vtxSrc, const char* fragSrc) {
 struct FBO {
     GLuint fbo = 0;
     GLuint texture = 0;
-    GLuint depthRenderbuffer = 0;
     int width = 0;
     int height = 0;
 
     void release() {
         if (texture) { glDeleteTextures(1, &texture); texture = 0; }
-        if (depthRenderbuffer) { glDeleteRenderbuffers(1, &depthRenderbuffer); depthRenderbuffer = 0; }
         if (fbo) { glDeleteFramebuffers(1, &fbo); fbo = 0; }
         width = 0; height = 0;
     }
 
-    void setup(int w, int h, bool needsDepth) {
+    void setup(int w, int h) {
         if (width == w && height == h) return;
         release();
         width = w; height = h;
@@ -184,14 +184,6 @@ struct FBO {
         glGenFramebuffers(1, &fbo);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
-
-        if (needsDepth) {
-            glGenRenderbuffers(1, &depthRenderbuffer);
-            glBindRenderbuffer(GL_RENDERBUFFER, depthRenderbuffer);
-            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, w, h);
-            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRenderbuffer);
-            glBindRenderbuffer(GL_RENDERBUFFER, 0);
-        }
 
         GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
         if (status != GL_FRAMEBUFFER_COMPLETE) {
@@ -268,8 +260,8 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeResize(JNIEnv* env, jclass claz
     gCtx.width = width;
     gCtx.height = height;
     
-    gCtx.maskFbo.setup(width, height, true);
-    gCtx.mainFbo.setup(width, height, false);
+    gCtx.maskFbo.setup(width, height);
+    gCtx.mainFbo.setup(width, height);
 
     float screenAspect = (float)height / (float)width;
     float cameraAspect = 16.0f / 9.0f; // Typical portrait
@@ -344,12 +336,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
     // --- PASS 2: Generate Face Mask ---
     glBindFramebuffer(GL_FRAMEBUFFER, gCtx.maskFbo.fbo);
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    glEnable(GL_DEPTH_TEST);
-    glEnable(GL_CULL_FACE);
-    glCullFace(GL_BACK);
-    glFrontFace(GL_CCW); // Default MediaPipe winding order
+    glClear(GL_COLOR_BUFFER_BIT);
 
     if (landmarks != nullptr) {
         jsize len = env->GetArrayLength(landmarks);
@@ -367,10 +354,6 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
             for (int idx : EYE_INDICES) { maskColors[idx*4+0]=0; maskColors[idx*4+1]=0; maskColors[idx*4+2]=0; maskColors[idx*4+3]=1; }
             for (int idx : LIP_INDICES) { maskColors[idx*4+0]=0; maskColors[idx*4+1]=0; maskColors[idx*4+2]=0; maskColors[idx*4+3]=1; }
             for (int idx : INNER_LIPS_INDICES) { maskColors[idx*4+0]=0; maskColors[idx*4+1]=0; maskColors[idx*4+2]=0; maskColors[idx*4+3]=1; }
-            for (int idx : LEFT_EYEBROW_INDICES) { maskColors[idx*4+0]=0; maskColors[idx*4+1]=0; maskColors[idx*4+2]=0; maskColors[idx*4+3]=1; }
-            for (int idx : RIGHT_EYEBROW_INDICES) { maskColors[idx*4+0]=0; maskColors[idx*4+1]=0; maskColors[idx*4+2]=0; maskColors[idx*4+3]=1; }
-            // Silhouette feathering
-            for (int idx : FACE_OVAL_INDICES) { maskColors[idx*4+0]=0; maskColors[idx*4+1]=0; maskColors[idx*4+2]=0; maskColors[idx*4+3]=1; }
 
             glUseProgram(gCtx.maskProgram);
             glUniform2f(gCtx.maskScaleHandle, gCtx.scaleX, gCtx.scaleY);
@@ -388,9 +371,6 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
             env->ReleaseFloatArrayElements(landmarks, data, JNI_ABORT);
         }
     }
-    
-    glDisable(GL_CULL_FACE);
-    glDisable(GL_DEPTH_TEST);
 
     // --- PASS 3: Apply Foundation & Render to Screen ---
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -431,3 +411,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeSetMakeup(JNIEnv* env, jclass c
 }
 
 } // extern "C"
+"""
+with open("cpp/FizgravityRenderer.cpp", "w") as f:
+    f.write(cpp_code)
+print("FizgravityRenderer.cpp successfully updated.")
