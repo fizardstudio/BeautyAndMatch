@@ -10,13 +10,22 @@
 
 ## Pembagian Tugas Agent
 
-### Claude (host) — eksekusi & reasoning
-Semua penulisan/perubahan kode ada di sini. Termasuk:
-- Implementasi & debugging GLSL shader (blend mode, blur pass, mask baking)
+Struktur: **Claude (host) = mandor** → orkestrasi, reasoning, planning, review/QC final. Penulisan kode untuk task besar/fitur baru **boleh** didelegasikan ke subagent Haiku 4.5 lewat workflow `feature-research`, tapi hasilnya wajib direview mandor sebelum dianggap selesai. Untuk edit kecil/langsung (satu-dua baris, fix cepat), Claude host tetap boleh edit sendiri tanpa lewat workflow — tidak semua perubahan perlu difull-orchestrate.
+
+### Claude (host) — mandor: orkestrasi, reasoning, review/QC
+- Breakdown task, tulis instruksi/prompt untuk subagent, putuskan kapan perlu riset (Gemini) vs langsung implementasi
+- **WAJIB review** hasil kode dari subagent Haiku (git diff + baca file yang diubah) sebelum melaporkan task selesai ke user — cek konsistensi dengan shader/JNI/state yang sudah ada, potensi bug, dan asumsi yang salah
+- Edit kecil/langsung, debugging cepat, fix build (Gradle/CMake) — boleh dikerjakan sendiri tanpa lewat subagent kalau lebih cepat daripada orchestrate
+- Integrasi akhir & keputusan arsitektur (mis. desain FBO multi-pass, kontrak JNI, struktur render loop)
+
+### Haiku 4.5 (subagent, via workflow `feature-research` fase Implement) — penulisan kode
+Dipanggil lewat `.claude/workflows/feature-research.js`, fase "Implement", setelah brief riset dari Gemini siap. Menulis kode berdasarkan brief + instruksi mandor:
+- Implementasi GLSL shader (blend mode, blur pass, mask baking) mengikuti brief
 - Kotlin ↔ C++ JNI bridge, CameraX/ImageAnalysis pipeline
 - Integrasi hasil MediaPipe (landmark, blendshape, transformation matrix) ke render loop
 - React Native side: state Zustand, komponen Skia, worklet camera
-- Review, refactor, fix build (Gradle/CMake)
+
+Subagent ini **tidak boleh** commit ke git — hanya ubah working tree. Hasilnya selalu berstatus "belum final" sampai direview mandor.
 
 ### Gemini (subagent `web-researcher`) — riset only, read-only
 Delegasikan HANYA untuk hal yang butuh info terkini/eksternal, contoh:
