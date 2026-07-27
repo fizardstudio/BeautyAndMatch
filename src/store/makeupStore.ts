@@ -9,6 +9,11 @@ export interface MakeupState {
   foundationColor: string;
   foundationOpacity: number;
   foundationBlur: number;
+  foundationType: 'matte' | 'dewy' | 'sheer' | 'satin' | 'luminous';
+
+  concealerColor: string;
+  concealerOpacity: number;
+  concealerStyle: 'traditional' | 'facelift' | 'corrector_green' | 'corrector_peach';
 
   blushColor: string;
   blushOpacity: number;
@@ -40,7 +45,8 @@ export interface MakeupState {
   cameraActive: boolean;
 
   // Setters
-  setFoundation: (settings: Partial<Pick<MakeupState, 'foundationColor' | 'foundationOpacity' | 'foundationBlur'>>) => void;
+  setFoundation: (settings: Partial<Pick<MakeupState, 'foundationColor' | 'foundationOpacity' | 'foundationBlur' | 'foundationType'>>) => void;
+  setConcealer: (settings: Partial<Pick<MakeupState, 'concealerColor' | 'concealerOpacity' | 'concealerStyle'>>) => void;
   setBlush: (settings: Partial<Pick<MakeupState, 'blushColor' | 'blushOpacity' | 'blushStyle'>>) => void;
   setContour: (settings: Partial<Pick<MakeupState, 'contourColor' | 'contourIntensity' | 'contourStyle'>>) => void;
   setLipstick: (settings: Partial<Pick<MakeupState, 'lipstickColor' | 'lipstickGlossiness' | 'lipstickOpacity'>>) => void;
@@ -53,24 +59,29 @@ export interface MakeupState {
 }
 
 const initialMakeup = {
-  foundationColor: '#F6C3A2',
-  foundationOpacity: 0.5,
+  foundationColor: '#00000000',
+  foundationOpacity: 0.0,
   foundationBlur: 8.0,
+  foundationType: 'matte' as const,
 
-  blushColor: '#E2725B',
-  blushOpacity: 0.4,
+  concealerColor: '#00000000',
+  concealerOpacity: 0.0,
+  concealerStyle: 'traditional' as const,
+
+  blushColor: '#00000000',
+  blushOpacity: 0.0,
   blushStyle: 'normal' as const,
 
-  contourColor: '#6B4D3C',
-  contourIntensity: 0.4,
+  contourColor: '#00000000',
+  contourIntensity: 0.0,
   contourStyle: 'normal' as const,
 
-  lipstickColor: '#D35400',
+  lipstickColor: '#00000000',
   lipstickGlossiness: 0.5,
-  lipstickOpacity: 0.6,
+  lipstickOpacity: 0.0,
 
-  eyeshadowColor: '#5D4037',
-  eyeshadowOpacity: 0.4,
+  eyeshadowColor: '#00000000',
+  eyeshadowOpacity: 0.0,
   eyeshadowStyle: 'normal' as const,
 };
 
@@ -91,6 +102,7 @@ export const useMakeupStore = create<MakeupState>((set, get) => ({
   cameraActive: true,
 
   setFoundation: (settings) => set((state) => ({ ...state, ...settings })),
+  setConcealer: (settings) => set((state) => ({ ...state, ...settings })),
   setBlush: (settings) => set((state) => ({ ...state, ...settings })),
   setContour: (settings) => set((state) => ({ ...state, ...settings })),
   setLipstick: (settings) => set((state) => ({ ...state, ...settings })),

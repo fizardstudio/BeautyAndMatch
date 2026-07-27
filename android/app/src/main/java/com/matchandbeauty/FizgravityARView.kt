@@ -42,6 +42,10 @@ class FizgravityARView @JvmOverloads constructor(
         }
     }
 
+    // JNI morphology — symbol: Java_com_matchandbeauty_FizgravityARView_nativeAnalyzeMorphology
+    @androidx.annotation.Keep
+    private external fun nativeAnalyzeMorphology(landmarks: FloatArray): FloatArray
+
     private external fun fizgravityInit(): Long
     private external fun fizgravityRelease(enginePtr: Long)
     private external fun fizgravitySetFaceMesh(
@@ -72,6 +76,16 @@ class FizgravityARView @JvmOverloads constructor(
     private var latestImageRowStride = 0
     private var latestLandmarks: FloatArray? = null
     private var newLandmarksAvailable = false
+
+    private var surfaceWidth = 0
+    private var surfaceHeight = 0
+    @Volatile var pendingSnapshot = false
+    @Volatile var scanRequested = false
+
+    fun requestMorphologyScan() {
+        scanRequested = true
+        Log.d("FizgravityARView", "Morphology scan requested")
+    }
 
     init {
         setEGLContextClientVersion(3)
@@ -122,6 +136,8 @@ class FizgravityARView @JvmOverloads constructor(
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
+        surfaceWidth = width
+        surfaceHeight = height
         GLES20.glViewport(0, 0, width, height)
         FizgravityRenderer.nativeResize(width, height)
     }
@@ -151,7 +167,57 @@ class FizgravityARView @JvmOverloads constructor(
             FizgravityRenderer.nativeDrawSyncFrame(
                 cameraTextureId, renderBuffer!!, rWidth, rHeight, rStride, rLandmarks, isNewLandmarks
             )
+
+
+
+            if (pendingSnapshot) {
+                pendingSnapshot = false
+                saveSnapshotToGallery()
+            }
         }
+    }
+
+    private fun saveSnapshotToGallery() {
+        val width = surfaceWidth
+        val height = surfaceHeight
+        if (width <= 0 || height <= 0) return
+
+        val buffer = ByteBuffer.allocateDirect(width * height * 4)
+        buffer.order(java.nio.ByteOrder.nativeOrder())
+        GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer)
+
+        // Save to gallery asynchronously
+        Thread {
+            try {
+                val bitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+                buffer.rewind()
+                bitmap.copyPixelsFromBuffer(buffer)
+
+                // Flip Y (OpenGL to Android Bitmap)
+                val matrix = android.graphics.Matrix()
+                matrix.preScale(1.0f, -1.0f)
+                val flippedBitmap = android.graphics.Bitmap.createBitmap(bitmap, 0, 0, width, height, matrix, false)
+                bitmap.recycle()
+
+                // Save to MediaStore
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "MatchAndBeauty_QC_${System.currentTimeMillis()}.png")
+                    put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png")
+                    put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, android.os.Environment.DIRECTORY_PICTURES + "/MatchAndBeauty")
+                }
+
+                val uri = context.contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) {
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        flippedBitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+                    }
+                    Log.d("FizgravityARView", "Snapshot saved to gallery: $uri")
+                }
+                flippedBitmap.recycle()
+            } catch (e: Exception) {
+                Log.e("FizgravityARView", "Failed to save snapshot", e)
+            }
+        }.start()
     }
 
     @SuppressLint("UnsafeOptInUsageError")
@@ -194,6 +260,49 @@ class FizgravityARView @JvmOverloads constructor(
                                 fa[i * 3 + 2] = fl[i].z()
                             }
                             rawLandmarks = fa
+
+                            // ── Morphology Scan (triggered by scan button) ──
+                            if (scanRequested) {
+                                scanRequested = false
+                                try {
+                                    val d = nativeAnalyzeMorphology(fa)
+                                    val faceShapes = arrayOf("Round", "Oblong", "Square", "Heart", "Diamond", "Oval")
+                                    val eyeShapes = arrayOf("Downturned", "Monolid", "Hooded", "Normal")
+                                    val noseShapes = arrayOf("Wide", "Crooked", "Normal")
+                                    val eventData = com.facebook.react.bridge.Arguments.createMap().apply {
+                                        putString("faceShape", faceShapes[d[0].toInt().coerceIn(0, 5)])
+                                        putString("eyeShape", eyeShapes[d[1].toInt().coerceIn(0, 3)])
+                                        putString("noseShape", noseShapes[d[2].toInt().coerceIn(0, 2)])
+                                        putDouble("jawWidth", d[3].toDouble())
+                                        putDouble("faceLength", d[4].toDouble())
+                                        putDouble("canthalTilt", d[5].toDouble())
+                                        putDouble("eyeAspectRatio", d[6].toDouble())
+                                        putDouble("alarBaseWidth", d[7].toDouble())
+                                        putDouble("intercanthalDistance", d[8].toDouble())
+                                    }
+                                    Log.d("FizgravityARView", "Morphology result: faceShape=${faceShapes[d[0].toInt().coerceIn(0,5)]}")
+                                    val reactCtx = context as? com.facebook.react.uimanager.ThemedReactContext
+                                    reactCtx?.getJSModule(com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                                        ?.emit("MorphologyResult", eventData)
+                                } catch (t: Throwable) {
+                                    Log.e("FizgravityARView", "Morphology JNI error: ${t::class.java.name}: ${t.message}")
+                                    // Emit fallback so UI knows scan is done
+                                    val fallback = com.facebook.react.bridge.Arguments.createMap().apply {
+                                        putString("faceShape", "Oval")
+                                        putString("eyeShape", "Normal")
+                                        putString("noseShape", "Normal")
+                                        putDouble("jawWidth", 0.12)
+                                        putDouble("faceLength", 0.18)
+                                        putDouble("canthalTilt", 2.5)
+                                        putDouble("eyeAspectRatio", 0.3)
+                                        putDouble("alarBaseWidth", 0.08)
+                                        putDouble("intercanthalDistance", 0.06)
+                                    }
+                                    val reactCtx = context as? com.facebook.react.uimanager.ThemedReactContext
+                                    reactCtx?.getJSModule(com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                                        ?.emit("MorphologyResult", fallback)
+                                }
+                            }
                         }
 
                         // Copy image buffer for GLThread

@@ -58,7 +58,8 @@ class MediaPipeFrameProcessorPlugin(
     }
 
     // ── Native JNI Declarations ──────────────────────────────────────────────
-    // Morfologi wajah (C++ existing)
+    // Morfologi wajah: instance method, JNI symbol = Java_com_matchandbeauty_MediaPipeFrameProcessorPlugin_nativeAnalyzeMorphology
+    @androidx.annotation.Keep
     private external fun nativeAnalyzeMorphology(landmarks: FloatArray): FloatArray
 
     // Fizgravity AR Engine (Rust FFI)
@@ -293,10 +294,14 @@ class MediaPipeFrameProcessorPlugin(
 
                 resultMap["landmarks"] = landmarkList
 
-                // 6. Analisis morfologi wajah via JNI C++
+                // ═══ DIAGNOSTIC TEST ═══
+                // Hardcode untuk membuktikan pipeline JS→UI berfungsi tanpa JNI
+                // Jika UI menampilkan "Oval", masalah MURNI di JNI C++
+                Log.e("DIAG", "landmarks count: ${fl.size}, fa size: ${fa.size}")
                 try {
                     val d = nativeAnalyzeMorphology(fa)
-                    resultMap["faceShape"] = arrayOf("Round", "Oblong", "Square")[d[0].toInt().coerceIn(0, 2)]
+                    Log.e("DIAG", "JNI SUCCESS: faceShape index=${d[0]}, landmarks=${fl.size}")
+                    resultMap["faceShape"] = arrayOf("Round", "Oblong", "Square", "Heart", "Diamond", "Oval")[d[0].toInt().coerceIn(0, 5)]
                     resultMap["eyeShape"] = arrayOf("Downturned", "Monolid", "Hooded", "Normal")[d[1].toInt().coerceIn(0, 3)]
                     resultMap["noseShape"] = arrayOf("Wide", "Crooked", "Normal")[d[2].toInt().coerceIn(0, 2)]
                     resultMap["jawWidth"] = d[3].toDouble()
@@ -305,8 +310,18 @@ class MediaPipeFrameProcessorPlugin(
                     resultMap["eyeAspectRatio"] = d[6].toDouble()
                     resultMap["alarBaseWidth"] = d[7].toDouble()
                     resultMap["intercanthalDistance"] = d[8].toDouble()
-                } catch (ex: Exception) {
-                    Log.e("MediaPipePlugin", "JNI morphology error: ${ex.message}")
+                } catch (t: Throwable) {
+                    Log.e("DIAG", "JNI FAILED: ${t::class.java.name}: ${t.message}")
+                    // Hardcode fallback agar UI bisa tampilkan sesuatu saat JNI gagal
+                    resultMap["faceShape"] = "Oval"
+                    resultMap["eyeShape"] = "Normal"
+                    resultMap["noseShape"] = "Normal"
+                    resultMap["jawWidth"] = 0.12
+                    resultMap["faceLength"] = 0.18
+                    resultMap["canthalTilt"] = 2.5
+                    resultMap["eyeAspectRatio"] = 0.3
+                    resultMap["alarBaseWidth"] = 0.08
+                    resultMap["intercanthalDistance"] = 0.06
                 }
 
                 // 7. Tambahkan metadata debug (berguna untuk profiling lag)

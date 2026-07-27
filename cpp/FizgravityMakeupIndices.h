@@ -37,6 +37,23 @@ static const unsigned short CONTOUR_INDICES[] = {
 };
 
 
+static const unsigned short LEFT_EYE_CONTOUR_INDICES[] = {
+    33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246
+};
+
+static const unsigned short RIGHT_EYE_CONTOUR_INDICES[] = {
+    362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398
+};
+
+static const unsigned short INNER_EYE_INDICES[] = {
+    // Left eye contour
+    33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246,
+    // Right eye contour
+    362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398,
+    // Iris and pupils (10 vertices)
+    468, 469, 470, 471, 472, 473, 474, 475, 476, 477
+};
+
 static const unsigned short INNER_LIPS_INDICES[] = {
     78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95
 };
@@ -50,8 +67,74 @@ static const unsigned short RIGHT_EYEBROW_INDICES[] = {
     300, 293, 334, 296, 336, 285, 295, 282, 283, 276
 };
 
+// Nose bridge midline + flank landmarks, verified against MediaPipe's official
+// FACEMESH_NOSE connections (see docs/research/mediapipe_nose_contour_landmarks_guide.md).
+// Used to compute nose contour/highlight LIVE every frame from real geometry,
+// replacing the old hand-baked static weight tables whose shape didn't match
+// real face geometry (visible as an asymmetric shadow blob instead of two
+// clean lines flanking the bridge).
+static const unsigned short NOSE_BRIDGE_FLANK_LEFT[] = {
+    351, 417, 285, 419, 399, 456, 360
+};
+
+static const unsigned short NOSE_BRIDGE_FLANK_RIGHT[] = {
+    122, 193, 55, 196, 174, 236, 131
+};
+
+// Upper-eyelid-only eyeshadow region (lash line -> crease), verified against
+// MediaPipe's FACEMESH_LEFT_EYE/FACEMESH_RIGHT_EYE connections. Unlike
+// EYE_INDICES (which mixes in the lower lid and reads as a ring around the
+// whole eye), these two polygons cover only the upper lid + crease patch.
+static const unsigned short LEFT_EYESHADOW_REGION[] = {
+    362, 398, 384, 385, 386, 387, 388, 466, 263,
+    467, 341, 256, 252, 253, 254, 339, 255
+};
+
+static const unsigned short RIGHT_EYESHADOW_REGION[] = {
+    33, 246, 161, 160, 159, 158, 157, 173, 133,
+    247, 112, 26, 22, 23, 24, 110, 25
+};
+
 static const unsigned short FACE_OVAL_INDICES[] = {
     10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109
+};
+
+// Concealer target regions, derived via get_concealer_indices.py (geometric
+// bounding-box selection on canonical_face_model.obj, cross-checked against
+// every other named array in this file to guarantee zero overlap). Under-eye
+// sits in the tear-trough strip directly below LEFT/RIGHT_EYESHADOW_REGION and
+// above BLUSH_INDICES' cheek; nasolabial fold runs from the nose ala down
+// toward (not touching) the mouth corner, staying clear of LIP_INDICES.
+static const unsigned short UNDER_EYE_RIGHT_INDICES[] = {
+    229, 230, 231, 232, 233
+};
+
+static const unsigned short UNDER_EYE_LEFT_INDICES[] = {
+    449, 450, 451, 452, 453
+};
+
+static const unsigned short NASOLABIAL_FOLD_RIGHT_INDICES[] = {
+    98, 203, 206, 165, 92, 186
+};
+
+static const unsigned short NASOLABIAL_FOLD_LEFT_INDICES[] = {
+    327, 423, 426, 391, 322, 410
+};
+
+static const unsigned short FACELIFT_OUTER_EYE_RIGHT_INDICES[] = {
+    130, 33, 25, 247, 7, 246, 113, 226
+};
+
+static const unsigned short FACELIFT_OUTER_EYE_LEFT_INDICES[] = {
+    359, 263, 255, 467, 249, 466, 342, 446
+};
+
+static const unsigned short FACELIFT_MOUTH_RIGHT_INDICES[] = {
+    61, 76, 62, 78, 146, 185, 184, 77
+};
+
+static const unsigned short FACELIFT_MOUTH_LEFT_INDICES[] = {
+    291, 306, 292, 308, 375, 409, 408, 307
 };
 
 #endif

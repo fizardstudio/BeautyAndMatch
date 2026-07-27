@@ -23,8 +23,9 @@ namespace match_and_beauty {
     DiagnosticsResult MatchAndBeautyCore::analyzeMorphology(const std::vector<Landmark>& landmarks) {
         DiagnosticsResult result;
         
-        // Safety check: MediaPipe face mesh landmarks count is usually 468 or 478.
-        if (landmarks.size() < 468) {
+        // Safety check: relax to 200 landmarks (partial face OK for diagnosis)
+        // MediaPipe returns 468 landmarks for standard model
+        if (landmarks.size() < 200) {
             result.faceShape = "Unknown";
             result.eyeShape = "Unknown";
             result.noseShape = "Unknown";
@@ -32,19 +33,20 @@ namespace match_and_beauty {
         }
 
         // Face Shape
-        float jawWidth = calculateDistance(landmarks[172], landmarks[397]);
-        float cheekboneWidth = calculateDistance(landmarks[234], landmarks[454]);
+        float R_aspect = calculateDistance(landmarks[10], landmarks[152]) / calculateDistance(landmarks[234], landmarks[454]);
+        float R_jaw_cheek = calculateDistance(landmarks[132], landmarks[361]) / calculateDistance(landmarks[234], landmarks[454]);
+        float R_forehead_jaw = calculateDistance(landmarks[54], landmarks[284]) / calculateDistance(landmarks[132], landmarks[361]);
+        
+        result.faceShape = "Oval"; // Default
+        if (R_aspect < 1.30f && R_jaw_cheek >= 0.82f) result.faceShape = "Round";
+        else if (R_aspect < 1.32f && R_jaw_cheek >= 0.85f) result.faceShape = "Square";
+        else if (R_aspect > 1.55f) result.faceShape = "Oblong";
+        else if (R_jaw_cheek < 0.68f && R_forehead_jaw >= 1.30f) result.faceShape = "Heart";
+        else if (R_jaw_cheek < 0.68f && R_forehead_jaw < 1.05f) result.faceShape = "Diamond";
+        else if (R_aspect >= 1.35f && R_aspect <= 1.50f && R_jaw_cheek >= 0.70f && R_jaw_cheek <= 0.80f) result.faceShape = "Oval";
+
+        float jawWidth = calculateDistance(landmarks[132], landmarks[361]);
         float faceLength = calculateDistance(landmarks[10], landmarks[152]);
-        
-        float width = std::max(jawWidth, cheekboneWidth);
-        
-        if (faceLength / width > 1.25f) {
-            result.faceShape = "Oblong";
-        } else if (width / faceLength > 0.85f) {
-            result.faceShape = "Round";
-        } else {
-            result.faceShape = "Square";
-        }
 
         // Eye Shape & Canthal Tilt
         float leftEyeH = calculateDistance(landmarks[33], landmarks[133]);
@@ -109,47 +111,62 @@ namespace match_and_beauty {
 #ifdef __ANDROID__
 #include <jni.h>
 
-extern "C"
-JNIEXPORT jfloatArray JNICALL
-Java_com_matchandbeauty_MediaPipeFrameProcessorPlugin_nativeAnalyzeMorphology(JNIEnv* env, jobject thiz, jfloatArray landmarksArray) {
-    jfloat* elements = env->GetFloatArrayElements(landmarksArray, nullptr);
-    jsize len = env->GetArrayLength(landmarksArray);
-    
-    std::vector<match_and_beauty::Landmark> cppLandmarks;
-    for (int i = 0; i < len; i += 3) {
-        cppLandmarks.push_back({elements[i], elements[i+1], elements[i+2]});
+extern "C" {
+    // Entry point dari MediaPipeFrameProcessorPlugin
+    JNIEXPORT jfloatArray JNICALL
+    Java_com_matchandbeauty_MediaPipeFrameProcessorPlugin_nativeAnalyzeMorphology(JNIEnv* env, jobject thiz, jfloatArray landmarksArray) {
+        jfloat* elements = env->GetFloatArrayElements(landmarksArray, nullptr);
+        jsize len = env->GetArrayLength(landmarksArray);
+        
+        std::vector<match_and_beauty::Landmark> cppLandmarks;
+        cppLandmarks.reserve(len / 3);
+        for (int i = 0; i < len; i += 3) {
+            cppLandmarks.push_back({elements[i], elements[i+1], elements[i+2]});
+        }
+        
+        env->ReleaseFloatArrayElements(landmarksArray, elements, JNI_ABORT);
+        
+        match_and_beauty::MatchAndBeautyCore core;
+        match_and_beauty::DiagnosticsResult result = core.analyzeMorphology(cppLandmarks);
+        
+        float outData[9] = {0};
+        
+        if (result.faceShape == "Round") outData[0] = 0.0f;
+        else if (result.faceShape == "Oblong") outData[0] = 1.0f;
+        else if (result.faceShape == "Square") outData[0] = 2.0f;
+        else if (result.faceShape == "Heart") outData[0] = 3.0f;
+        else if (result.faceShape == "Diamond") outData[0] = 4.0f;
+        else outData[0] = 5.0f; // Oval
+        
+        if (result.eyeShape == "Downturned") outData[1] = 0.0f;
+        else if (result.eyeShape == "Monolid") outData[1] = 1.0f;
+        else if (result.eyeShape == "Hooded") outData[1] = 2.0f;
+        else outData[1] = 3.0f; // Normal
+        
+        if (result.noseShape == "Wide") outData[2] = 0.0f;
+        else if (result.noseShape == "Crooked") outData[2] = 1.0f;
+        else outData[2] = 2.0f; // Normal
+        
+        outData[3] = result.jawWidth;
+        outData[4] = result.faceLength;
+        outData[5] = result.canthalTilt;
+        outData[6] = result.eyeAspectRatio;
+        outData[7] = result.alarBaseWidth;
+        outData[8] = result.intercanthalDistance;
+        
+        jfloatArray outJniArray = env->NewFloatArray(9);
+        if (outJniArray != nullptr) {
+            env->SetFloatArrayRegion(outJniArray, 0, 9, outData);
+        }
+        return outJniArray;
     }
-    
-    env->ReleaseFloatArrayElements(landmarksArray, elements, JNI_ABORT);
-    
-    match_and_beauty::MatchAndBeautyCore core;
-    match_and_beauty::DiagnosticsResult result = core.analyzeMorphology(cppLandmarks);
-    
-    float outData[9];
-    
-    if (result.faceShape == "Round") outData[0] = 0.0f;
-    else if (result.faceShape == "Oblong") outData[0] = 1.0f;
-    else outData[0] = 2.0f; // Square
-    
-    if (result.eyeShape == "Downturned") outData[1] = 0.0f;
-    else if (result.eyeShape == "Monolid") outData[1] = 1.0f;
-    else if (result.eyeShape == "Hooded") outData[1] = 2.0f;
-    else outData[1] = 3.0f; // Normal
-    
-    if (result.noseShape == "Wide") outData[2] = 0.0f;
-    else if (result.noseShape == "Crooked") outData[2] = 1.0f;
-    else outData[2] = 2.0f; // Normal
-    
-    outData[3] = result.jawWidth;
-    outData[4] = result.faceLength;
-    outData[5] = result.canthalTilt;
-    outData[6] = result.eyeAspectRatio;
-    outData[7] = result.alarBaseWidth;
-    outData[8] = result.intercanthalDistance;
-    
-    jfloatArray outJniArray = env->NewFloatArray(9);
-    env->SetFloatArrayRegion(outJniArray, 0, 9, outData);
-    return outJniArray;
+
+    // Entry point dari FizgravityARView (shared implementation)
+    JNIEXPORT jfloatArray JNICALL
+    Java_com_matchandbeauty_FizgravityARView_nativeAnalyzeMorphology(JNIEnv* env, jobject thiz, jfloatArray landmarksArray) {
+        return Java_com_matchandbeauty_MediaPipeFrameProcessorPlugin_nativeAnalyzeMorphology(env, thiz, landmarksArray);
+    }
 }
 #endif
+
 
