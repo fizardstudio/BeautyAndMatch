@@ -261,16 +261,14 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             vec3 litFoundation = uFoundationColor.rgb * (skinLuma * 0.85 + 0.15);
             
             float effectiveOpacity = clamp(uFoundationColor.a, 0.0, 1.0);
-            if (skinLuma < 0.38) {
-                effectiveOpacity = min(effectiveOpacity, 0.65);
-                litFoundation += vec3(0.04, 0.015, 0.0);
-            }
+            float darkBlend = 1.0 - smoothstep(0.30, 0.38, skinLuma);
+            effectiveOpacity = mix(effectiveOpacity, min(effectiveOpacity, 0.65), darkBlend);
+            litFoundation += vec3(0.04, 0.015, 0.0) * darkBlend;
             
             vec3 foundationEffect = origColor.rgb;
             
             if (uFoundationType == 0) {
-                vec3 deShinedBlurred = mix(blurred, vec3(skinLuma), 0.08);
-                vec3 coveredSkin = mix(deShinedBlurred, litFoundation, 1.0);
+                vec3 coveredSkin = litFoundation;
                 foundationEffect = coveredSkin + (highFreq * 0.40 * hfMultiplier);
             } else if (uFoundationType == 1) {
                 vec3 coveredSkin = mix(blurred, litFoundation, 0.65);
@@ -316,11 +314,8 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             if (uConcealerStyle == 2 || uConcealerStyle == 3) {
                 float targetingMask = 1.0;
                 if (uConcealerStyle == 2) {
-                    if (origColor.r > origColor.g + origColor.b * 0.5) {
-                        targetingMask = 1.0;
-                    } else {
-                        targetingMask = 0.0;
-                    }
+                    float redness = origColor.r - (origColor.g + origColor.b * 0.5);
+                    targetingMask = smoothstep(-0.05, 0.05, redness);
                 }
                 vec3 correctorTarget = blendSoftLight(blurred, uConcealerColor.rgb);
                 currentSkin = mix(currentSkin, correctorTarget + highFreq, concealerStrength * targetingMask);
@@ -472,28 +467,28 @@ struct RendererContext {
     GLint maskIsHoleH;
 
     GLuint foundationProgram;
-    GLuint fndPositionHandle, fndTexCoordHandle;
-    GLuint fndCameraTexHandle;
-    GLuint fndMaskTexHandle;
-    GLuint fndTexelSizeHandle;
-    GLuint fndBlurRadiusHandle;
-    GLuint fndColorHandle;
-    GLuint fndTypeHandle;
-    GLuint fndContourColorHandle;
-    GLuint fndHighlightColorHandle;
-    GLuint fndBlushColorHandle;
-    GLuint fndLipstickColorHandle;
-    GLuint fndLipMaskTexHandle;
-    GLuint fndEyeshadowColorHandle;
-    GLuint fndEyeMaskTexHandle;
-    GLuint fndConcealerColorHandle;
-    GLuint fndConcealerMaskTexHandle;
-    GLuint fndConcealerStyleHandle;
-    GLuint fndContourStyleHandle;
-    GLuint fndBlushStyleHandle;
-    GLuint fndScaleHandle;
-    GLuint fndOffsetHandle;
-    GLuint fndBoundsHandle;
+    GLint fndPositionHandle, fndTexCoordHandle;
+    GLint fndCameraTexHandle;
+    GLint fndMaskTexHandle;
+    GLint fndTexelSizeHandle;
+    GLint fndBlurRadiusHandle;
+    GLint fndColorHandle;
+    GLint fndTypeHandle;
+    GLint fndContourColorHandle;
+    GLint fndHighlightColorHandle;
+    GLint fndBlushColorHandle;
+    GLint fndLipstickColorHandle;
+    GLint fndLipMaskTexHandle;
+    GLint fndEyeshadowColorHandle;
+    GLint fndEyeMaskTexHandle;
+    GLint fndConcealerColorHandle;
+    GLint fndConcealerMaskTexHandle;
+    GLint fndConcealerStyleHandle;
+    GLint fndContourStyleHandle;
+    GLint fndBlushStyleHandle;
+    GLint fndScaleHandle;
+    GLint fndOffsetHandle;
+    GLint fndBoundsHandle;
 
     // --- Makeup Mesh Program (Blush, Contour rendered directly on face mesh) ---
     GLuint makeupWeightProgram;
@@ -601,6 +596,29 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     gCtx.fndScaleHandle = glGetUniformLocation(gCtx.foundationProgram, "uScale");
     gCtx.fndOffsetHandle = glGetUniformLocation(gCtx.foundationProgram, "uOffset");
     gCtx.fndBoundsHandle = glGetUniformLocation(gCtx.foundationProgram, "uFaceBounds");
+
+    // Validation logging for foundation shader handles
+    if (gCtx.fndPositionHandle == -1) LOGE("Foundation shader: attribute 'aPosition' not found");
+    if (gCtx.fndTexCoordHandle == -1) LOGE("Foundation shader: attribute 'aTexCoord' not found");
+    if (gCtx.fndCameraTexHandle == -1) LOGE("Foundation shader: uniform 'sCameraTex' not found");
+    if (gCtx.fndMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sMaskTex' not found");
+    if (gCtx.fndTexelSizeHandle == -1) LOGE("Foundation shader: uniform 'uTexelSize' not found");
+    if (gCtx.fndBlurRadiusHandle == -1) LOGE("Foundation shader: uniform 'uFoundationBlurRadius' not found");
+    if (gCtx.fndColorHandle == -1) LOGE("Foundation shader: uniform 'uFoundationColor' not found");
+    if (gCtx.fndTypeHandle == -1) LOGE("Foundation shader: uniform 'uFoundationType' not found");
+    if (gCtx.fndContourColorHandle == -1) LOGE("Foundation shader: uniform 'uContourColor' not found");
+    if (gCtx.fndHighlightColorHandle == -1) LOGE("Foundation shader: uniform 'uHighlightColor' not found");
+    if (gCtx.fndBlushColorHandle == -1) LOGE("Foundation shader: uniform 'uBlushColor' not found");
+    if (gCtx.fndLipstickColorHandle == -1) LOGE("Foundation shader: uniform 'uLipstickColor' not found");
+    if (gCtx.fndLipMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sLipMaskTex' not found");
+    if (gCtx.fndEyeshadowColorHandle == -1) LOGE("Foundation shader: uniform 'uEyeshadowColor' not found");
+    if (gCtx.fndEyeMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sEyeMaskTex' not found");
+    if (gCtx.fndConcealerColorHandle == -1) LOGE("Foundation shader: uniform 'uConcealerColor' not found");
+    if (gCtx.fndConcealerMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sConcealerMaskTex' not found");
+    if (gCtx.fndConcealerStyleHandle == -1) LOGE("Foundation shader: uniform 'uConcealerStyle' not found");
+    if (gCtx.fndScaleHandle == -1) LOGE("Foundation shader: uniform 'uScale' not found");
+    if (gCtx.fndOffsetHandle == -1) LOGE("Foundation shader: uniform 'uOffset' not found");
+    if (gCtx.fndBoundsHandle == -1) LOGE("Foundation shader: uniform 'uFaceBounds' not found");
 
     // Blur Shader
     gCtx.blurProgram = createProgram(BLUR_VERTEX_SHADER, BLUR_FRAGMENT_SHADER);

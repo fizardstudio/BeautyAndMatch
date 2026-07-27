@@ -183,30 +183,4 @@ Java_com_matchandbeauty_FizgravityARView_fizgravityGetPredictedLandmarks(
     return result;
 }
 
-// ── MediaPipeFrameProcessorPlugin JNI Wrappers ───────────────────────────────
-JNIEXPORT jlong JNICALL
-Java_com_matchandbeauty_MediaPipeFrameProcessorPlugin_fizgravityInit(JNIEnv* env, jobject thiz) {
-    return Java_com_matchandbeauty_FizgravityARView_fizgravityInit(env, thiz);
-}
-
-JNIEXPORT void JNICALL
-Java_com_matchandbeauty_MediaPipeFrameProcessorPlugin_fizgravityRelease(JNIEnv* env, jobject thiz, jlong enginePtr) {
-    Java_com_matchandbeauty_FizgravityARView_fizgravityRelease(env, thiz, enginePtr);
-}
-
-JNIEXPORT jint JNICALL
-Java_com_matchandbeauty_MediaPipeFrameProcessorPlugin_fizgravityPushImu(JNIEnv* env, jobject thiz, jlong enginePtr, jfloat gx, jfloat gy, jfloat gz, jfloat ax, jfloat ay, jfloat az, jfloat timestampSec) {
-    return Java_com_matchandbeauty_FizgravityARView_fizgravityPushImu(env, thiz, enginePtr, gx, gy, gz, ax, ay, az, timestampSec);
-}
-
-JNIEXPORT jint JNICALL
-Java_com_matchandbeauty_MediaPipeFrameProcessorPlugin_fizgravitySetFaceMesh(JNIEnv* env, jobject thiz, jlong enginePtr, jfloatArray vertices, jfloatArray blendshapes) {
-    return Java_com_matchandbeauty_FizgravityARView_fizgravitySetFaceMesh(env, thiz, enginePtr, vertices, blendshapes);
-}
-
-JNIEXPORT jfloatArray JNICALL
-Java_com_matchandbeauty_MediaPipeFrameProcessorPlugin_fizgravityGetPredictedLandmarks(JNIEnv* env, jobject thiz, jlong enginePtr, jfloat dt_predict) {
-    return Java_com_matchandbeauty_FizgravityARView_fizgravityGetPredictedLandmarks(env, thiz, enginePtr, dt_predict);
-}
-
 } // extern "C"

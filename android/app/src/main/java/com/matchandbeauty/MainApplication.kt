@@ -41,10 +41,5 @@ class MainApplication : Application(), ReactApplication {
       // If you opted-in for the New Architecture, we load the native entry point for this app.
       load()
     }
-    
-    // Register custom MediaPipe Frame Processor Plugin
-    com.mrousavy.camera.frameprocessors.FrameProcessorPluginRegistry.addFrameProcessorPlugin("detectFaceLandmarks") { _, options ->
-        MediaPipeFrameProcessorPlugin(applicationContext, options)
-    }
   }
 }

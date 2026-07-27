@@ -2,6 +2,10 @@ package com.matchandbeauty
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.util.AttributeSet
@@ -26,7 +30,7 @@ import javax.microedition.khronos.opengles.GL10
 
 class FizgravityARView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
-) : GLSurfaceView(context, attrs), GLSurfaceView.Renderer {
+) : GLSurfaceView(context, attrs), GLSurfaceView.Renderer, SensorEventListener {
 
     companion object {
         init { System.loadLibrary("match_and_beauty_core") }
@@ -54,6 +58,9 @@ class FizgravityARView @JvmOverloads constructor(
     private external fun fizgravityGetPredictedLandmarks(
         enginePtr: Long, dtPredict: Float
     ): FloatArray?
+    private external fun fizgravityPushImu(
+        enginePtr: Long, gx: Float, gy: Float, gz: Float, ax: Float, ay: Float, az: Float, timestampSec: Float
+    ): Int
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var cameraTextureId = -1
@@ -63,7 +70,17 @@ class FizgravityARView @JvmOverloads constructor(
     private var fizgravityEnginePtr: Long = 0L
 
     private val engineLock = Any()
-    
+
+    // IMU Sensor fields
+    @Volatile private var lastGyroX = 0f
+    @Volatile private var lastGyroY = 0f
+    @Volatile private var lastGyroZ = 0f
+    @Volatile private var lastAccelX = 0f
+    @Volatile private var lastAccelY = 0f
+    @Volatile private var lastAccelZ = 9.81f
+    private var sensorManager: SensorManager? = null
+    private val startTimeNs = System.nanoTime()
+
     // Double Buffering for Timestamp Synchronization
     private var bufferA: ByteBuffer? = null
     private var bufferB: ByteBuffer? = null
@@ -94,6 +111,7 @@ class FizgravityARView @JvmOverloads constructor(
 
         setupMediaPipe()
         initFizgravityEngine()
+        initSensorManager()
     }
 
     private fun setupMediaPipe() {
@@ -126,6 +144,18 @@ class FizgravityARView @JvmOverloads constructor(
             fizgravityEnginePtr = fizgravityInit()
         } catch (e: Exception) {
             Log.e("FizgravityARView", "Engine init exception: ${e.message}")
+        }
+    }
+
+    private fun initSensorManager() {
+        try {
+            sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+            val gyro = sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+            val accel = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            if (gyro != null) sensorManager?.registerListener(this, gyro, SensorManager.SENSOR_DELAY_FASTEST)
+            if (accel != null) sensorManager?.registerListener(this, accel, SensorManager.SENSOR_DELAY_FASTEST)
+        } catch (e: Exception) {
+            Log.e("FizgravityARView", "SensorManager init error: ${e.message}")
         }
     }
 
@@ -259,7 +289,36 @@ class FizgravityARView @JvmOverloads constructor(
                                 fa[i * 3 + 1] = 1.0f - fl[i].x()
                                 fa[i * 3 + 2] = fl[i].z()
                             }
-                            rawLandmarks = fa
+
+                            // Extract blendshapes for engine stabilization
+                            val blendshapes = FloatArray(52)
+                            if (result.faceBlendshapes().isPresent) {
+                                val bs = result.faceBlendshapes().get()[0]
+                                for (j in 0 until minOf(bs.size, 52)) {
+                                    blendshapes[j] = bs[j].score()
+                                }
+                            }
+
+                            // Feed raw landmarks to Fizgravity engine and get predicted/stabilized output
+                            var finalLandmarks: FloatArray = fa // fallback: raw MediaPipe landmarks
+                            val enginePtr = fizgravityEnginePtr
+                            if (enginePtr != 0L && fizgravityLoaded) {
+                                try {
+                                    synchronized(engineLock) {
+                                        fizgravitySetFaceMesh(enginePtr, fa, blendshapes)
+                                    }
+                                    val dtPredict = 0.016f // ~1 frame ahead at 60fps
+                                    val predicted = synchronized(engineLock) {
+                                        fizgravityGetPredictedLandmarks(enginePtr, dtPredict)
+                                    }
+                                    if (predicted != null && predicted.size == fa.size) {
+                                        finalLandmarks = predicted
+                                    }
+                                } catch (e: Exception) {
+                                    Log.w("FizgravityARView", "Engine call failed, using MediaPipe direct: ${e.message}")
+                                }
+                            }
+                            rawLandmarks = finalLandmarks
 
                             // ── Morphology Scan (triggered by scan button) ──
                             if (scanRequested) {
@@ -378,9 +437,36 @@ class FizgravityARView @JvmOverloads constructor(
         return textures[0]
     }
 
+    override fun onSensorChanged(event: SensorEvent) {
+        when (event.sensor.type) {
+            Sensor.TYPE_GYROSCOPE -> {
+                lastGyroX = event.values[0]
+                lastGyroY = event.values[1]
+                lastGyroZ = event.values[2]
+            }
+            Sensor.TYPE_ACCELEROMETER -> {
+                lastAccelX = event.values[0]
+                lastAccelY = event.values[1]
+                lastAccelZ = event.values[2]
+            }
+        }
+        val ptr = fizgravityEnginePtr
+        if (ptr != 0L && fizgravityLoaded) {
+            val tsSeconds = (event.timestamp - startTimeNs) / 1_000_000_000f
+            try {
+                synchronized(engineLock) {
+                    fizgravityPushImu(ptr, lastGyroX, lastGyroY, lastGyroZ, lastAccelX, lastAccelY, lastAccelZ, tsSeconds)
+                }
+            } catch (e: Exception) { /* silent: hot path, don't log every call */ }
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         cameraExecutor.shutdown()
+        try { sensorManager?.unregisterListener(this) } catch (e: Exception) {}
         val ptr = fizgravityEnginePtr
         if (ptr != 0L && fizgravityLoaded) {
             try { fizgravityRelease(ptr) } catch (e: Exception) {}
