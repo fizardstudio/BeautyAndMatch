@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import HomeScreen from './src/screens/HomeScreen';
 import TryOnScreen from './src/screens/TryOnScreen';
 import { THEME } from './src/theme';
@@ -24,33 +25,35 @@ const App = () => {
   const [activeTab, setActiveTab] = useState<Tab>('home');
 
   return (
-    <View style={styles.root}>
-      <View style={styles.screenArea}>
-        {activeTab === 'home' && <HomeScreen />}
-        {activeTab === 'tryon' && <TryOnScreen />}
-        {activeTab === 'looks' && <ComingSoonScreen title="Galeri Look" />}
-        {activeTab === 'profile' && <ComingSoonScreen title="Profil" />}
-      </View>
+    <SafeAreaProvider>
+      <View style={styles.root}>
+        <View style={styles.screenArea}>
+          {activeTab === 'home' && <HomeScreen />}
+          {activeTab === 'tryon' && <TryOnScreen />}
+          {activeTab === 'looks' && <ComingSoonScreen title="Galeri Look" />}
+          {activeTab === 'profile' && <ComingSoonScreen title="Profil" />}
+        </View>
 
-      {activeTab !== 'tryon' && (
-        <SafeAreaView style={styles.tabBarSafe}>
-          <View style={styles.tabBar}>
-            <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('home')}>
-              <TabIcon active={activeTab === 'home'} glyph="⌂" label="Home" />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('tryon')}>
-              <TabIcon active={false} glyph="◉" label="Try-On" />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('looks')}>
-              <TabIcon active={activeTab === 'looks'} glyph="▦" label="Looks" />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('profile')}>
-              <TabIcon active={activeTab === 'profile'} glyph="◍" label="Profil" />
-            </TouchableOpacity>
-          </View>
-        </SafeAreaView>
-      )}
-    </View>
+        {activeTab !== 'tryon' && (
+          <SafeAreaView style={styles.tabBarSafe} edges={['bottom']}>
+            <View style={styles.tabBar}>
+              <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('home')}>
+                <TabIcon active={activeTab === 'home'} glyph="⌂" label="Home" />
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('tryon')}>
+                <TabIcon active={false} glyph="◉" label="Try-On" />
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('looks')}>
+                <TabIcon active={activeTab === 'looks'} glyph="▦" label="Looks" />
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('profile')}>
+                <TabIcon active={activeTab === 'profile'} glyph="◍" label="Profil" />
+              </TouchableOpacity>
+            </View>
+          </SafeAreaView>
+        )}
+      </View>
+    </SafeAreaProvider>
   );
 };
 
