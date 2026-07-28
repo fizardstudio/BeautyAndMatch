@@ -201,6 +201,10 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
     uniform float uAmbientCCT;       // Kelvin
     uniform float uAmbientIntensity; // 0.0 - 1.0-ish
 
+    // Before/after split-screen divider position: 0.0 = divider at left edge (all raw),
+    // 1.0 = divider at right edge (all makeup). See usage below for the split logic.
+    uniform float uShowMakeup;
+
     vec3 computeBlur(sampler2D tex, vec2 uv, vec2 texel, float maxRadius) {
         vec3 result = vec3(0.0);
         
@@ -385,6 +389,15 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             vec3 lipMultiply = currentSkin * uLipstickColor.rgb;
             currentSkin = mix(currentSkin, lipMultiply, lipAlpha * uLipstickColor.a);
 
+            // Before/after split-screen comparison: uShowMakeup is a horizontal divider
+            // position (0.0 = divider at the left edge, so the whole frame is raw; 1.0 =
+            // divider at the right edge, so the whole frame is full makeup). Left of the
+            // divider shows composited makeup, right of it shows raw camera, with a small
+            // feathered band at the divider itself instead of a razor-hard cut.
+            float splitFeather = 0.01;
+            float rawSide = smoothstep(uShowMakeup - splitFeather, uShowMakeup + splitFeather, vTexCoord.x);
+            currentSkin = mix(currentSkin, origColor.rgb, rawSide);
+
             gl_FragColor = vec4(currentSkin, origColor.a);
         } else {
             gl_FragColor = origColor;
@@ -519,6 +532,7 @@ struct RendererContext {
     GLint fndBoundsHandle;
     GLint fndAmbientCctHandle;
     GLint fndAmbientIntensityHandle;
+    GLint fndShowMakeupHandle;
 
     // --- Makeup Mesh Program (Blush, Contour rendered directly on face mesh) ---
     GLuint makeupWeightProgram;
@@ -561,6 +575,8 @@ struct RendererContext {
 
     float ambientCctKelvin = 6500.0f; // Neutral D65 daylight default — safe no-op tint until real data arrives
     float ambientIntensity = 1.0f;    // Neutral (no darkening) default
+
+    float showMakeup = 1.0f; // Before/after slider: 0=raw camera, 1=full makeup (default)
 
     // Morphology cache (updated at ~5fps to avoid overhead)
     std::string lastFaceShape = "";
@@ -631,6 +647,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     gCtx.fndBoundsHandle = glGetUniformLocation(gCtx.foundationProgram, "uFaceBounds");
     gCtx.fndAmbientCctHandle = glGetUniformLocation(gCtx.foundationProgram, "uAmbientCCT");
     gCtx.fndAmbientIntensityHandle = glGetUniformLocation(gCtx.foundationProgram, "uAmbientIntensity");
+    gCtx.fndShowMakeupHandle = glGetUniformLocation(gCtx.foundationProgram, "uShowMakeup");
 
     // Validation logging for foundation shader handles
     if (gCtx.fndPositionHandle == -1) LOGE("Foundation shader: attribute 'aPosition' not found");
@@ -656,6 +673,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     if (gCtx.fndBoundsHandle == -1) LOGE("Foundation shader: uniform 'uFaceBounds' not found");
     if (gCtx.fndAmbientCctHandle == -1) LOGE("Foundation shader: uniform 'uAmbientCCT' not found");
     if (gCtx.fndAmbientIntensityHandle == -1) LOGE("Foundation shader: uniform 'uAmbientIntensity' not found");
+    if (gCtx.fndShowMakeupHandle == -1) LOGE("Foundation shader: uniform 'uShowMakeup' not found");
 
     // Blur Shader
     gCtx.blurProgram = createProgram(BLUR_VERTEX_SHADER, BLUR_FRAGMENT_SHADER);
@@ -1235,6 +1253,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
     glUniform1i(gCtx.fndConcealerStyleHandle, gCtx.concealerStyle);
     glUniform1f(gCtx.fndAmbientCctHandle, gCtx.ambientCctKelvin);
     glUniform1f(gCtx.fndAmbientIntensityHandle, gCtx.ambientIntensity);
+    glUniform1f(gCtx.fndShowMakeupHandle, gCtx.showMakeup);
 
     glVertexAttribPointer(gCtx.fndPositionHandle, 2, GL_FLOAT, GL_FALSE, 0, QUAD_VERTICES);
     glEnableVertexAttribArray(gCtx.fndPositionHandle);
@@ -1275,6 +1294,11 @@ JNIEXPORT void JNICALL
 Java_com_matchandbeauty_FizgravityRenderer_nativeSetAmbientLighting(JNIEnv* env, jclass clazz, jfloat cctKelvin, jfloat intensity) {
     gCtx.ambientCctKelvin = cctKelvin;
     gCtx.ambientIntensity = intensity;
+}
+
+JNIEXPORT void JNICALL
+Java_com_matchandbeauty_FizgravityRenderer_nativeSetShowMakeup(JNIEnv* env, jclass clazz, jfloat value) {
+    gCtx.showMakeup = value;
 }
 
 JNIEXPORT void JNICALL

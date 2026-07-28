@@ -24,6 +24,42 @@ function hexToRGBA(hex: string, alpha: number): [number, number, number, number]
 
 const foundationTypes = ['matte', 'dewy', 'sheer', 'satin', 'luminous'] as const;
 
+// Draggable before/after divider. Renders FIRST inside uiOverlay (before topBar/bottom
+// dock) so its full-width drag layer sits BELOW them in touch z-order — later siblings
+// intercept their own taps normally, while the uncovered middle area falls through to
+// this drag layer. value/onChange are the same 0..1 fraction the native shader uses to
+// position the split (0 = divider at left edge/all raw, 1 = divider at right edge/all
+// makeup); left of the line shows makeup, right shows raw camera.
+const CompareDivider = ({ value, onChange }: any) => {
+  const screenWidth = Dimensions.get('window').width;
+  const dividerX = value * screenWidth;
+
+  const panResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderMove: (_evt, gestureState) => {
+      const clamped = Math.max(0, Math.min(1, gestureState.moveX / screenWidth));
+      onChange(clamped);
+    },
+  }), [screenWidth, onChange]);
+
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+      <View style={StyleSheet.absoluteFill} {...panResponder.panHandlers} />
+      <View style={[styles.compareLabelChip, { left: 16 }]} pointerEvents="none">
+        <Text style={styles.compareLabelText}>MAKEUP</Text>
+      </View>
+      <View style={[styles.compareLabelChip, { right: 16 }]} pointerEvents="none">
+        <Text style={styles.compareLabelText}>ASLI</Text>
+      </View>
+      <View style={[styles.compareDividerLine, { left: dividerX }]} pointerEvents="none" />
+      <View style={[styles.compareDividerHandle, { left: dividerX - 20 }]} pointerEvents="none">
+        <Text style={styles.compareDividerHandleIcon}>⇄</Text>
+      </View>
+    </View>
+  );
+};
+
 const GlassSlider = ({ label, min, max, value, onChange }: any) => {
   const [trackWidth, setTrackWidth] = useState(0);
 
@@ -85,6 +121,8 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
   const [isScanning, setIsScanning] = useState(false);
   const [scanTriggerId, setScanTriggerId] = useState(0);
   const [showDiagnosticsOverlay, setShowDiagnosticsOverlay] = useState(false);
+  const [compareMode, setCompareMode] = useState(false);
+  const [showMakeupValue, setShowMakeupValue] = useState(0.5);
 
   const scanAnim = useRef(new Animated.Value(0)).current;
 
@@ -193,11 +231,16 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
         makeupFoundationType={foundationType === 'dewy' ? 1 : foundationType === 'sheer' ? 2 : foundationType === 'satin' ? 3 : foundationType === 'luminous' ? 4 : 0}
         makeupFoundationBlur={foundationBlur}
         makeupConcealerStyle={concealerStyleInt}
+        showMakeup={compareMode ? showMakeupValue : 1.0}
       />
 
       <Animated.View style={[styles.scanLine, scanLineStyle]} />
 
       <View style={styles.uiOverlay} pointerEvents="box-none">
+        {/* BEFORE/AFTER DRAGGABLE DIVIDER — rendered first so topBar/bottom dock (later
+            siblings below) sit on top of it in touch z-order and stay tappable. */}
+        {compareMode && <CompareDivider value={showMakeupValue} onChange={setShowMakeupValue} />}
+
         {/* TOP BAR */}
         <View style={styles.topBar}>
           <TouchableOpacity style={styles.iconChip} onPress={onBack} disabled={!onBack}>
@@ -207,6 +250,10 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
           <Text style={styles.wordmark}>M & B</Text>
 
           <View style={styles.topRightIcons}>
+            <TouchableOpacity style={styles.iconChip} onPress={() => setCompareMode(!compareMode)}>
+              <Text style={[styles.chipIcon, compareMode && { color: THEME.roseQuartz }]}>⇄</Text>
+            </TouchableOpacity>
+
             <TouchableOpacity style={styles.iconChip} onPress={() => setShowMesh(!showMesh)}>
               <Text style={[styles.chipIcon, !showMesh && styles.chipIconInactive]}>{showMesh ? '✨' : '🕸️'}</Text>
             </TouchableOpacity>
@@ -412,6 +459,47 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.14)',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  compareDividerLine: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 2,
+    backgroundColor: 'rgba(255,255,255,0.85)',
+    shadowColor: '#000',
+    shadowOpacity: 0.5,
+    shadowRadius: 4,
+  },
+  compareDividerHandle: {
+    position: 'absolute',
+    top: '50%',
+    marginTop: -20,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(20,12,15,0.65)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  compareDividerHandleIcon: {
+    color: '#fff',
+    fontSize: 16,
+  },
+  compareLabelChip: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 62 : 58,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: 'rgba(20,12,15,0.5)',
+  },
+  compareLabelText: {
+    color: THEME.textLight,
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1,
   },
   chipIcon: {
     fontSize: 16,

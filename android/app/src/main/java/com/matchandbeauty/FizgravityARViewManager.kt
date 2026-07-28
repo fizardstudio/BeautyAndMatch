@@ -113,4 +113,11 @@ class FizgravityARViewManager : SimpleViewManager<FizgravityARView>() {
             view.requestMorphologyScan()
         }
     }
+
+    // Before/after split-screen divider position: 0.0 = all raw camera, 1.0 = all
+    // makeup, in-between = divider sits at that fraction across the screen.
+    @com.facebook.react.uimanager.annotations.ReactProp(name = "showMakeup", defaultFloat = 1.0f)
+    fun setShowMakeup(view: FizgravityARView, value: Float) {
+        FizgravityRenderer.nativeSetShowMakeup(value)
+    }
 }
