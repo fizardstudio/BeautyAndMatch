@@ -264,15 +264,26 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
         vec4 origColor = texture2D(sCameraTex, vTexCoord);
         vec4 mask = texture2D(sMaskTex, vTexCoord);
 
-        float foundationMask = mask.r;
-        float contourAlpha   = mask.g * foundationMask;
-        float blushAlpha     = mask.b * foundationMask;
-        float highlightAlpha = mask.a * foundationMask;
-        float lipAlpha       = texture2D(sLipMaskTex, vTexCoord).r * foundationMask;
-        float eyeAlpha       = texture2D(sEyeMaskTex, vTexCoord).r * foundationMask;
-        float concealerAlpha = texture2D(sConcealerMaskTex, vTexCoord).r * foundationMask;
+        // faceMask = broad "are we anywhere on the tracked face" gate, used by every
+        // layer EXCEPT foundation. foundationMask is narrower: it additionally excludes
+        // the outer lip surface (via the already-baked lipRawMask, same soft per-vertex
+        // falloff as the LIPSTICK layer, no new geometry needed) so foundation color
+        // never sits underneath lipstick's multiply blend — real MUA technique leaves
+        // lips untouched by general face foundation (dedicated neutral lip primer is a
+        // separate, deliberately-restrained product, not the user's arbitrary foundation
+        // shade at full strength), and multiply is the least forgiving blend mode for a
+        // non-neutral color like this app's user-picked foundation to sit underneath.
+        float faceMask = mask.r;
+        float lipRawMask = texture2D(sLipMaskTex, vTexCoord).r;
+        float foundationMask = faceMask * (1.0 - lipRawMask);
+        float contourAlpha   = mask.g * faceMask;
+        float blushAlpha     = mask.b * faceMask;
+        float highlightAlpha = mask.a * faceMask;
+        float lipAlpha       = lipRawMask * faceMask;
+        float eyeAlpha       = texture2D(sEyeMaskTex, vTexCoord).r * faceMask;
+        float concealerAlpha = texture2D(sConcealerMaskTex, vTexCoord).r * faceMask;
 
-        if (foundationMask > 0.0 || contourAlpha > 0.0 || blushAlpha > 0.0 || highlightAlpha > 0.0 || lipAlpha > 0.0 || eyeAlpha > 0.0 || concealerAlpha > 0.0) {
+        if (faceMask > 0.0 || contourAlpha > 0.0 || blushAlpha > 0.0 || highlightAlpha > 0.0 || lipAlpha > 0.0 || eyeAlpha > 0.0 || concealerAlpha > 0.0) {
             // Spatial radius must be large enough (>15px) to blur out pores so they are isolated in highFreq
             float activeRadius = 16.0; 
             vec3 blurred = computeBlur(sCameraTex, vTexCoord, uTexelSize, activeRadius);
