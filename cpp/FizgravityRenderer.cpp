@@ -658,7 +658,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeResize(JNIEnv* env, jclass claz
 
 JNIEXPORT void JNICALL
 Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
-    JNIEnv* env, jclass clazz, jint textureId, jobject buffer, jint width, jint height, jint rowStride, jfloatArray landmarks, jboolean isNewLandmarks) 
+    JNIEnv* env, jclass clazz, jint textureId, jobject buffer, jint width, jint height, jint rowStride, jfloatArray landmarks, jboolean hasNewImage)
 {
     void* pixels = env->GetDirectBufferAddress(buffer);
     if (!pixels) return;
@@ -668,7 +668,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
     // Calculate dynamic aspect ratio
     float screenAspect = (float)gCtx.height / (float)gCtx.width;
     float cameraAspect = (float)height / (float)width;
-    if (width > height) cameraAspect = (float)width / (float)height; 
+    if (width > height) cameraAspect = (float)width / (float)height;
 
     if (screenAspect > cameraAspect) {
         gCtx.scaleX = screenAspect / cameraAspect;
@@ -678,12 +678,20 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
         gCtx.scaleY = cameraAspect / screenAspect;
     }
 
-    // Update Camera Texture
+    // Camera texture must be (re)bound every frame regardless of hasNewImage — texture
+    // unit 0 gets repointed to other textures (mainFbo, maskBlurFbo, ...) later in this
+    // same function, so on interpolation ticks (hasNewImage=false) skipping the bind here
+    // would leave PASS 1 sampling whatever texture unit 0 was left on from the previous
+    // frame's later passes instead of the camera image. Only the actual pixel upload
+    // (glTexImage2D) is skipped when there's no new frame — the texture object already
+    // holds the last uploaded image's data.
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, textureId);
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, rowStride / 4);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    if (hasNewImage) {
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, rowStride / 4);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    }
 
     const float QUAD_VERTICES[] = {
         -1.0f, -1.0f,

@@ -13,7 +13,7 @@ object FizgravityRenderer {
         height: Int, 
         rowStride: Int, 
         landmarks: FloatArray?,
-        isNewLandmarks: Boolean
+        hasNewImage: Boolean
     )
     @JvmStatic external fun nativeSetMakeup(regionType: Int, r: Float, g: Float, b: Float, a: Float)
     @JvmStatic external fun nativeSetMakeupStyle(regionType: Int, style: Int)

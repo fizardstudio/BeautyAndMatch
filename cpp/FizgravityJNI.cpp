@@ -25,6 +25,7 @@ typedef void    (*FnFizRelease)(void*);
 typedef int     (*FnFizPushImu)(void*, float, float, float, float, float, float, float);
 typedef int     (*FnFizSetFaceMesh)(void*, const float*, const float*);
 typedef int     (*FnFizGetPredictedLandmarks)(void*, float*, int, float);
+typedef int     (*FnFizGetStabilizedLandmarks)(void*, float*, int);
 
 // Handle ke library Fizgravity yang dimuat secara lazy
 static void* gFizLibHandle = nullptr;
@@ -33,6 +34,7 @@ static FnFizRelease           gFizRelease            = nullptr;
 static FnFizPushImu           gFizPushImu            = nullptr;
 static FnFizSetFaceMesh       gFizSetFaceMesh        = nullptr;
 static FnFizGetPredictedLandmarks gFizGetPredicted   = nullptr;
+static FnFizGetStabilizedLandmarks gFizGetStabilized = nullptr;
 static bool                   gFizLoaded             = false;
 
 // ── Lazy-load libfizgravity_ar.so saat pertama kali dibutuhkan ─────────────────
@@ -63,8 +65,9 @@ static bool ensureFizgravityLoaded() {
     gFizPushImu    = (FnFizPushImu)           dlsym(gFizLibHandle, "fizgravity_engine_push_imu");
     gFizSetFaceMesh= (FnFizSetFaceMesh)       dlsym(gFizLibHandle, "fizgravity_engine_set_face_mesh");
     gFizGetPredicted=(FnFizGetPredictedLandmarks)dlsym(gFizLibHandle, "fizgravity_engine_get_predicted_landmarks");
+    gFizGetStabilized=(FnFizGetStabilizedLandmarks)dlsym(gFizLibHandle, "fizgravity_engine_get_stabilized_landmarks");
 
-    if (!gFizInit || !gFizRelease || !gFizPushImu || !gFizSetFaceMesh || !gFizGetPredicted) {
+    if (!gFizInit || !gFizRelease || !gFizPushImu || !gFizSetFaceMesh || !gFizGetPredicted || !gFizGetStabilized) {
         LOGE("dlsym failed — missing symbols in libfizgravity_ar.so: %s", dlerror());
         dlclose(gFizLibHandle);
         gFizLibHandle = nullptr;
@@ -177,6 +180,28 @@ Java_com_matchandbeauty_FizgravityARView_fizgravityGetPredictedLandmarks(
     if (n <= 0) return nullptr;
 
     // Buat jfloatArray dan salin hasilnya
+    jfloatArray result = env->NewFloatArray(n * 3);
+    if (result == nullptr) return nullptr; // OOM
+    env->SetFloatArrayRegion(result, 0, n * 3, out_buf);
+    return result;
+}
+
+// fizgravityGetStabilizedLandmarks(enginePtr) → FloatArray? (468*3 floats atau null)
+// One-Euro filtered only — tanpa ekstrapolasi RK4/rotasi gyro/blend prediktif.
+JNIEXPORT jfloatArray JNICALL
+Java_com_matchandbeauty_FizgravityARView_fizgravityGetStabilizedLandmarks(
+    JNIEnv* env, jobject thiz,
+    jlong enginePtr)
+{
+    if (!gFizLoaded || gFizGetStabilized == nullptr) return nullptr;
+    void* ptr = (void*)(uintptr_t)enginePtr;
+    if (ptr == nullptr) return nullptr;
+
+    static thread_local float out_buf[1404];
+    int n = gFizGetStabilized(ptr, out_buf, 468);
+
+    if (n <= 0) return nullptr;
+
     jfloatArray result = env->NewFloatArray(n * 3);
     if (result == nullptr) return nullptr; // OOM
     env->SetFloatArrayRegion(result, 0, n * 3, out_buf);

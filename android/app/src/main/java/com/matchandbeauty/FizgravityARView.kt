@@ -58,6 +58,9 @@ class FizgravityARView @JvmOverloads constructor(
     private external fun fizgravityGetPredictedLandmarks(
         enginePtr: Long, dtPredict: Float
     ): FloatArray?
+    private external fun fizgravityGetStabilizedLandmarks(
+        enginePtr: Long
+    ): FloatArray?
     private external fun fizgravityPushImu(
         enginePtr: Long, gx: Float, gy: Float, gz: Float, ax: Float, ay: Float, az: Float, timestampSec: Float
     ): Int
@@ -94,6 +97,14 @@ class FizgravityARView @JvmOverloads constructor(
     private var latestLandmarks: FloatArray? = null
     private var newLandmarksAvailable = false
 
+    private var lastRenderedBuffer: ByteBuffer? = null
+    private var lastRenderedWidth = 0
+    private var lastRenderedHeight = 0
+    private var lastRenderedRowStride = 0
+    private var lastRenderedLandmarks: FloatArray? = null
+    private var lastMediaPipeUpdateNs = 0L
+    private var lastDrawNs = 0L
+
     private var surfaceWidth = 0
     private var surfaceHeight = 0
     @Volatile var pendingSnapshot = false
@@ -107,6 +118,13 @@ class FizgravityARView @JvmOverloads constructor(
     init {
         setEGLContextClientVersion(3)
         setRenderer(this)
+        // Diagnostic revert (temporary): back to WHEN_DIRTY — draw only when
+        // requestRender() is explicitly called after a new camera frame is ready,
+        // instead of forcing a redraw every ~33ms regardless of whether new data
+        // arrived. This isolates whether CONTINUOUS+the 30fps software gate itself
+        // is the source of "getar" (which happens even with no face in frame, so it
+        // can't be landmark-prediction related), independent of every other fix
+        // already applied (camera resolution, AE range, landmark path cleanup).
         renderMode = RENDERMODE_WHEN_DIRTY
 
         setupMediaPipe()
@@ -173,13 +191,23 @@ class FizgravityARView @JvmOverloads constructor(
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        // Cap the render loop at ~30fps instead of letting RENDERMODE_CONTINUOUS run
+        // uncapped at the display's native vsync rate (~60fps). Uncapped rendering
+        // competes with MediaPipe's GPU delegate for the same GPU, slowing tracking
+        // down and making the whole pipeline feel laggier overall — 30fps is still a
+        // large smoothness win over the original MediaPipe-coupled ~17fps while leaving
+        // the GPU enough headroom for MediaPipe to run at its natural speed.
+        val nowNsGate = System.nanoTime()
+        if (nowNsGate - lastDrawNs < 33_000_000L) return
+        lastDrawNs = nowNsGate
+
         var renderBuffer: ByteBuffer? = null
         var rWidth = 0
         var rHeight = 0
         var rStride = 0
         var rLandmarks: FloatArray? = null
-        var isNewLandmarks = false
 
+        // Check for new camera frame
         synchronized(renderLock) {
             if (latestImageBuffer != null) {
                 renderBuffer = latestImageBuffer
@@ -187,25 +215,149 @@ class FizgravityARView @JvmOverloads constructor(
                 rHeight = latestImageHeight
                 rStride = latestImageRowStride
                 rLandmarks = latestLandmarks
-                isNewLandmarks = newLandmarksAvailable
                 newLandmarksAvailable = false
                 latestImageBuffer = null
+
+                // Cache this frame for interpolation on subsequent ticks
+                lastRenderedBuffer = renderBuffer
+                lastRenderedWidth = rWidth
+                lastRenderedHeight = rHeight
+                lastRenderedRowStride = rStride
+                lastRenderedLandmarks = rLandmarks
+                lastMediaPipeUpdateNs = System.nanoTime()
             }
         }
-        
+
+        // If we have a new frame, draw with it
         if (renderBuffer != null) {
+            val drawStartNs = System.nanoTime()
             FizgravityRenderer.nativeDrawSyncFrame(
-                cameraTextureId, renderBuffer!!, rWidth, rHeight, rStride, rLandmarks, isNewLandmarks
+                cameraTextureId, renderBuffer!!, rWidth, rHeight, rStride, rLandmarks, hasNewImage = true
             )
+            val drawMs = (System.nanoTime() - drawStartNs) / 1_000_000.0
 
-
+            perfFrameCount++
+            perfDrawMsSum += drawMs
+            if (drawMs > perfDrawMsMax) perfDrawMsMax = drawMs
+            trackJitter(rLandmarks, "real")
 
             if (pendingSnapshot) {
                 pendingSnapshot = false
                 saveSnapshotToGallery()
             }
+        } else if (lastRenderedBuffer != null && lastRenderedLandmarks != null) {
+            // No new frame yet: redraw the SAME frozen camera image with the SAME
+            // last-real landmarks (no IMU-based extrapolation). Deliberately not
+            // pushing the landmarks forward here — the camera texture underneath is
+            // frozen (it's literally the last real frame's pixels), so moving the
+            // makeup overlay ahead of it via prediction makes the overlay visibly
+            // detach/float relative to the static face image beneath it every time
+            // MediaPipe hasn't caught up yet. That mismatch — not landmark noise —
+            // is what was reading as jitter. Keeping both frozen together means an
+            // interpolation tick is visually identical to the last real tick.
+            val drawStartNs = System.nanoTime()
+            FizgravityRenderer.nativeDrawSyncFrame(
+                cameraTextureId, lastRenderedBuffer!!, lastRenderedWidth, lastRenderedHeight, lastRenderedRowStride, lastRenderedLandmarks, hasNewImage = false
+            )
+            val drawMs = (System.nanoTime() - drawStartNs) / 1_000_000.0
+
+            perfFrameCount++
+            perfDrawMsSum += drawMs
+            if (drawMs > perfDrawMsMax) perfDrawMsMax = drawMs
+            trackJitter(lastRenderedLandmarks, "pred")
+        }
+
+        // Log perf stats for all frames (real and interpolated)
+        val nowNs = System.nanoTime()
+        val elapsedNs = nowNs - perfWindowStartNs
+        if (elapsedNs >= 2_000_000_000L && perfFrameCount > 0) {
+            val fps = perfFrameCount / (elapsedNs / 1_000_000_000.0)
+            val avgDrawMs = perfDrawMsSum / perfFrameCount
+            Log.i("FizgravityPerf", "fps=%.1f avgDrawMs=%.2f maxDrawMs=%.2f frames=$perfFrameCount".format(fps, avgDrawMs, perfDrawMsMax))
+            perfFrameCount = 0
+            perfDrawMsSum = 0.0
+            perfDrawMsMax = 0.0
+            perfWindowStartNs = nowNs
         }
     }
+
+    private var perfFrameCount = 0
+    private var perfDrawMsSum = 0.0
+    private var perfDrawMsMax = 0.0
+    private var perfWindowStartNs = System.nanoTime()
+
+    // Objective per-vertex jitter measurement (RMS distance between this frame's
+    // landmarks and the previous displayed frame's), broken down by whether each
+    // frame came from a real MediaPipe detection or an interpolated IMU prediction,
+    // and specifically flagging the transition frames (source changed since the
+    // last displayed frame) — lets us tell apart "prediction is noisy in general"
+    // from "the snap at the real<->predicted boundary is the problem" using actual
+    // numbers instead of subjective "does it look shaky" reports.
+    private var prevDisplayedLandmarks: FloatArray? = null
+    private var prevDisplayedSource: String? = null
+    private var jitterWindowStartNs = System.nanoTime()
+    private var jitterRealSum = 0.0
+    private var jitterRealMax = 0.0
+    private var jitterRealCount = 0
+    private var jitterPredSum = 0.0
+    private var jitterPredMax = 0.0
+    private var jitterPredCount = 0
+    private var jitterTransitionSum = 0.0
+    private var jitterTransitionMax = 0.0
+    private var jitterTransitionCount = 0
+
+    private fun trackJitter(landmarks: FloatArray?, source: String) {
+        if (landmarks == null) return
+        val prev = prevDisplayedLandmarks
+        if (prev != null && prev.size == landmarks.size) {
+            var sumSq = 0.0
+            for (i in landmarks.indices) {
+                val d = (landmarks[i] - prev[i]).toDouble()
+                sumSq += d * d
+            }
+            val rms = kotlin.math.sqrt(sumSq / landmarks.size)
+            val isTransition = prevDisplayedSource != null && prevDisplayedSource != source
+            if (isTransition) {
+                jitterTransitionSum += rms
+                jitterTransitionCount++
+                if (rms > jitterTransitionMax) jitterTransitionMax = rms
+            } else if (source == "real") {
+                jitterRealSum += rms
+                jitterRealCount++
+                if (rms > jitterRealMax) jitterRealMax = rms
+            } else {
+                jitterPredSum += rms
+                jitterPredCount++
+                if (rms > jitterPredMax) jitterPredMax = rms
+            }
+        }
+        prevDisplayedLandmarks = landmarks
+        prevDisplayedSource = source
+
+        val nowNs = System.nanoTime()
+        if (nowNs - jitterWindowStartNs >= 2_000_000_000L) {
+            val realAvg = if (jitterRealCount > 0) jitterRealSum / jitterRealCount else 0.0
+            val predAvg = if (jitterPredCount > 0) jitterPredSum / jitterPredCount else 0.0
+            val transAvg = if (jitterTransitionCount > 0) jitterTransitionSum / jitterTransitionCount else 0.0
+            Log.i(
+                "FizgravityJitter",
+                "real(avg=%.5f max=%.5f n=%d) pred(avg=%.5f max=%.5f n=%d) transition(avg=%.5f max=%.5f n=%d)".format(
+                    realAvg, jitterRealMax, jitterRealCount,
+                    predAvg, jitterPredMax, jitterPredCount,
+                    transAvg, jitterTransitionMax, jitterTransitionCount
+                )
+            )
+            jitterRealSum = 0.0; jitterRealMax = 0.0; jitterRealCount = 0
+            jitterPredSum = 0.0; jitterPredMax = 0.0; jitterPredCount = 0
+            jitterTransitionSum = 0.0; jitterTransitionMax = 0.0; jitterTransitionCount = 0
+            jitterWindowStartNs = nowNs
+        }
+    }
+
+    private var perfMpCount = 0
+    private var perfMpMsSum = 0.0
+    private var perfMpMsMax = 0.0
+    private var perfMpWindowStartNs = System.nanoTime()
 
     private fun saveSnapshotToGallery() {
         val width = surfaceWidth
@@ -257,17 +409,48 @@ class FizgravityARView @JvmOverloads constructor(
             cameraProvider = cameraProviderFuture.get()
             
             val resolutionSelector = androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
+                // Target is given in the sensor's native (landscape) coordinate space,
+                // matching how Camera2's stream configuration list reports sizes —
+                // confirmed via `adb shell dumpsys media.camera` that this device's
+                // front sensor exposes an exact 1920x1080 stream. Previously this was
+                // Size(1080, 1920) (portrait-shaped), which does NOT match that space;
+                // CLOSEST_HIGHER_THEN_LOWER then measured "closest" against the wrong
+                // orientation and fell back all the way to 2304x1296 (~3MP, 44% more
+                // pixels) instead of the intended ~2MP capture. That inflated MediaPipe
+                // inference time (measured avg ~50ms, spikes to ~140ms) and, in turn,
+                // destabilized the One-Euro filter's dt-based velocity estimate.
                 .setResolutionStrategy(androidx.camera.core.resolutionselector.ResolutionStrategy(
-                    android.util.Size(1080, 1920), 
+                    android.util.Size(1920, 1080),
                     androidx.camera.core.resolutionselector.ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                ))
+                // Without an explicit AspectRatioStrategy, CameraX defaults to
+                // RATIO_4_3_FALLBACK_AUTO_STRATEGY and silently overrides the
+                // resolution preference above, picking a 4:3 stream (e.g. the
+                // sensor's full 2304x1728) instead of something close to our
+                // 16:9 target.
+                .setAspectRatioStrategy(androidx.camera.core.resolutionselector.AspectRatioStrategy(
+                    androidx.camera.core.AspectRatio.RATIO_16_9,
+                    androidx.camera.core.resolutionselector.AspectRatioStrategy.FALLBACK_RULE_AUTO
                 ))
                 .build()
 
-            val imageAnalysis = ImageAnalysis.Builder()
+            val imageAnalysisBuilder = ImageAnalysis.Builder()
                 .setResolutionSelector(resolutionSelector)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                .build()
+
+            // Ask for a flexible 10-30fps AE range via Camera2Interop instead of leaving it
+            // fully unconstrained. A rigid fixed 30fps range forces short exposure regardless
+            // of scene brightness and can underexpose to near-black in anything less than
+            // strong direct light; this flexible range still lets AE drop fps for exposure
+            // in dim conditions while permitting up to 30fps when there's enough light.
+            androidx.camera.camera2.interop.Camera2Interop.Extender(imageAnalysisBuilder)
+                .setCaptureRequestOption(
+                    android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                    android.util.Range(10, 30)
+                )
+
+            val imageAnalysis = imageAnalysisBuilder.build()
 
             imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
                 val landmarker = faceLandmarker
@@ -277,8 +460,21 @@ class FizgravityARView @JvmOverloads constructor(
                     val timestampMs = imageProxy.imageInfo.timestamp / 1_000_000L
                     
                     try {
+                        val mpStartNs = System.nanoTime()
                         val result = landmarker.detectForVideo(mpImage, timestampMs)
-                        
+                        val mpMs = (System.nanoTime() - mpStartNs) / 1_000_000.0
+                        perfMpMsSum += mpMs
+                        perfMpCount++
+                        if (mpMs > perfMpMsMax) perfMpMsMax = mpMs
+                        val nowNs2 = System.nanoTime()
+                        if (nowNs2 - perfMpWindowStartNs >= 2_000_000_000L) {
+                            Log.i("FizgravityPerf", "mediapipe avgMs=%.2f maxMs=%.2f res=${imageProxy.width}x${imageProxy.height} samples=$perfMpCount".format(perfMpMsSum / perfMpCount, perfMpMsMax))
+                            perfMpMsSum = 0.0
+                            perfMpMsMax = 0.0
+                            perfMpCount = 0
+                            perfMpWindowStartNs = nowNs2
+                        }
+
                         var rawLandmarks: FloatArray? = null
                         if (result.faceLandmarks().isNotEmpty()) {
                             val fl = result.faceLandmarks()[0]
@@ -299,7 +495,16 @@ class FizgravityARView @JvmOverloads constructor(
                                 }
                             }
 
-                            // Feed raw landmarks to Fizgravity engine and get predicted/stabilized output
+                            // Feed raw landmarks to Fizgravity engine and read back the
+                            // One-Euro-stabilized result. Deliberately NOT going through
+                            // fizgravityGetPredictedLandmarks here — that call also applies
+                            // RK4 gyro-rotation extrapolation + a 50% blend against the last
+                            // predicted frame, which injects raw IMU noise into every single
+                            // real detection. That extrapolation path exists to bridge gaps
+                            // between detections (used in onDrawFrame's interpolation branch
+                            // when there's no new camera frame) — applying it here too was
+                            // the actual source of the "bergetar" jitter, and explains why
+                            // tuning the One-Euro filter parameters alone had no effect.
                             var finalLandmarks: FloatArray = fa // fallback: raw MediaPipe landmarks
                             val enginePtr = fizgravityEnginePtr
                             if (enginePtr != 0L && fizgravityLoaded) {
@@ -307,12 +512,11 @@ class FizgravityARView @JvmOverloads constructor(
                                     synchronized(engineLock) {
                                         fizgravitySetFaceMesh(enginePtr, fa, blendshapes)
                                     }
-                                    val dtPredict = 0.016f // ~1 frame ahead at 60fps
-                                    val predicted = synchronized(engineLock) {
-                                        fizgravityGetPredictedLandmarks(enginePtr, dtPredict)
+                                    val stabilized = synchronized(engineLock) {
+                                        fizgravityGetStabilizedLandmarks(enginePtr)
                                     }
-                                    if (predicted != null && predicted.size == fa.size) {
-                                        finalLandmarks = predicted
+                                    if (stabilized != null && stabilized.size == fa.size) {
+                                        finalLandmarks = stabilized
                                     }
                                 } catch (e: Exception) {
                                     Log.w("FizgravityARView", "Engine call failed, using MediaPipe direct: ${e.message}")
