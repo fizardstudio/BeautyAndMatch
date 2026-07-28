@@ -151,6 +151,42 @@ kelas atas (Banuba dkk.) pakai deteksi warna piksel di atas dahi atau model segm
 (BiSeNet/CelebAMask-HQ, kelas "skin" vs "hair" terpisah) buat akurasi per-orang. Segmentasi rambut asli
 dicatat sebagai follow-up terpisah (butuh model ML tambahan), bukan dikerjakan sesi ini.
 
+### 0.4 — Hair segmentation asli (percobaan MediaPipe malam ini: DIBATALKAN, coba lagi lewat Fizgravity/ONNX)
+
+Percobaan pertama (2026-07-29 dini hari): pakai model resmi Google `hair_segmenter.tflite` via MediaPipe
+`ImageSegmenter` (library `tasks-vision` yang sama dengan `FaceLandmarker`), untuk gate `foundationMask`
+per-piksel presisi (bukan cuma heuristik geometri 0.3 di atas). **Dibatalkan setelah 2 masalah nyata
+ketemu berturut-turut:**
+
+1. **Crash native di GPU delegate** — `image_frame.cc:291 Format UNKNOWN`, bug upstream MediaPipe yang
+   masih terbuka (`google-ai-edge/mediapipe-samples#484`, `mediapipe#5265`, `#5503`, `#5788`): jalur
+   convert GPU-texture→CPU-ImageFrame buat output confidence-mask (bukan buat landmark biasa) gagal di
+   banyak device Android, nggak ada fix resmi — semua thread solusinya "pakai CPU delegate". Fixed dengan
+   paksa `Delegate.CPU` (FaceLandmarker tetap aman di GPU karena outputnya cuma koordinat angka, bukan
+   gambar/mask — beda jalur konversi sama sekali).
+2. **Mismatch orientasi** — mask hasil segmenter (640×360, sesuai `trackingBitmap` mentah/landscape
+   sensor) di-sample di shader compositing pakai `vTexCoord` yang sudah dalam ruang portrait/ter-rotasi
+   (sama seperti `sCameraTex`). Landmark wajah sudah dapat koreksi rotasi eksplisit di Kotlin
+   (`fa[i*3]=1-fl[i].y()`, swap x/y), tapi mask gambar hair segmenter nggak dapat koreksi yang sama —
+   hasilnya foundation cuma nongol di garis vertikal sempit yang kebetulan align, bukan ngikutin bentuk
+   wajah. Belum di-fix (diputuskan cabut fitur, bukan tambal).
+
+**Arah selanjutnya (disepakati bareng user, TAMO penuh di sesi baru)**: bangun hair segmentation sendiri
+lewat **Fizgravity-AR-Engine (Rust) + ONNX Runtime**, BUKAN lewat MediaPipe Java Task API — sepenuhnya
+menghindari bug GPU di atas (karena nggak lewat jalur convert MediaPipe sama sekali) dan kita pegang
+kontrol penuh soal orientasi dari desain awal. **Preseden sudah ada di codebase**: `Fizgravity-AR-Engine/
+src/face.rs` (`FaceModelSession`, pakai crate `ort` yang sudah ada di `Cargo.toml`) sudah punya pipeline
+inference ONNX yang jalan (dipakai sebagai fallback tracker wajah 256×256×3 → 468 titik) — pattern-nya
+tinggal diadaptasi buat model segmentasi (input gambar → output mask per-piksel, bukan koordinat).
+Sisi C++/shader (`sHairMaskTex`, `foundationMask *= (1.0 - hairConfidence)`, upload tekstur `GL_LUMINANCE`)
+yang ditulis Haiku malam ini masih valid secara desain dan bisa dipakai ulang — cuma sumber datanya yang
+ganti dari Kotlin/MediaPipe ke Rust/Fizgravity.
+
+**PR buat sesi berikutnya**: cari/siapkan model segmentasi rambut format ONNX (`hair_segmenter.tflite`
+yang sudah di-download nggak kepakai lagi, TFLite ≠ ONNX — perlu model ONNX terpisah atau hasil konversi),
+tulis fungsi inference Rust baru mengikuti pattern `FaceModelSession`, tambah JNI bridge baru, pastikan
+orientasi output mask konsisten dengan `sCameraTex`/landmark sejak awal desain.
+
 ### 0.3 — Ketahanan Lintas-Device (bukan "harus punya banyak HP")
 
 Constraint nyata: cuma ada satu device fisik untuk testing. Solusinya BUKAN beli banyak HP — dua jalan
