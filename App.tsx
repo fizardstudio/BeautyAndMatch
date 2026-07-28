@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, BackHandler } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import HomeScreen from './src/screens/HomeScreen';
 import TryOnScreen from './src/screens/TryOnScreen';
@@ -24,12 +24,21 @@ const TabIcon = ({ active, glyph, label }: { active: boolean; glyph: string; lab
 const App = () => {
   const [activeTab, setActiveTab] = useState<Tab>('home');
 
+  useEffect(() => {
+    if (activeTab === 'home' || activeTab === 'tryon') return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      setActiveTab('home');
+      return true;
+    });
+    return () => sub.remove();
+  }, [activeTab]);
+
   return (
     <SafeAreaProvider>
       <View style={styles.root}>
         <View style={styles.screenArea}>
           {activeTab === 'home' && <HomeScreen />}
-          {activeTab === 'tryon' && <TryOnScreen />}
+          {activeTab === 'tryon' && <TryOnScreen onBack={() => setActiveTab('home')} />}
           {activeTab === 'looks' && <ComingSoonScreen title="Galeri Look" />}
           {activeTab === 'profile' && <ComingSoonScreen title="Profil" />}
         </View>

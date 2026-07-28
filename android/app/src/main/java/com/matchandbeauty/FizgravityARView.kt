@@ -465,6 +465,7 @@ class FizgravityARView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
+        try { cameraProvider?.unbindAll() } catch (e: Exception) {}
         cameraExecutor.shutdown()
         try { sensorManager?.unregisterListener(this) } catch (e: Exception) {}
         val ptr = fizgravityEnginePtr

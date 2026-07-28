@@ -2,13 +2,17 @@ import React, { useEffect, useRef, useState, useMemo } from 'react';
 import {
   StyleSheet, View, Text, TouchableOpacity, PermissionsAndroid,
   Platform, ActivityIndicator, Dimensions, ScrollView, Animated, Easing,
-  PanResponder, DeviceEventEmitter
+  PanResponder, DeviceEventEmitter, BackHandler
 } from 'react-native';
 import { requireNativeComponent } from 'react-native';
 import { useMakeupStore } from '../store/makeupStore';
 import { THEME } from '../theme';
 
 const FizgravityARView = requireNativeComponent<any>('FizgravityARView');
+
+interface TryOnScreenProps {
+  onBack?: () => void;
+}
 
 function hexToRGBA(hex: string, alpha: number): [number, number, number, number] {
   if (hex === '#00000000') return [0, 0, 0, 0];
@@ -73,7 +77,7 @@ const StylePill = ({ title, selected, onPress }: any) => (
   </TouchableOpacity>
 );
 
-const TryOnScreen = () => {
+const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
   const arViewRef = useRef<any>(null);
   const [hasPermission, setHasPermission] = useState(false);
   const [showMesh, setShowMesh] = useState(true);
@@ -104,6 +108,15 @@ const TryOnScreen = () => {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    if (!onBack) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      onBack();
+      return true;
+    });
+    return () => sub.remove();
+  }, [onBack]);
 
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('MorphologyResult', (data: any) => {
@@ -187,7 +200,7 @@ const TryOnScreen = () => {
       <View style={styles.uiOverlay} pointerEvents="box-none">
         {/* TOP BAR */}
         <View style={styles.topBar}>
-          <TouchableOpacity style={styles.iconChip} onPress={() => {}}>
+          <TouchableOpacity style={styles.iconChip} onPress={onBack} disabled={!onBack}>
             <Text style={styles.chipIcon}>‹</Text>
           </TouchableOpacity>
 
