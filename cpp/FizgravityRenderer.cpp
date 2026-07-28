@@ -197,6 +197,10 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
     uniform vec4 uLipstickColor;
     uniform vec4 uConcealerColor;
 
+    // Ambient lighting estimation (from face-as-diffuse-light-probe analysis)
+    uniform float uAmbientCCT;       // Kelvin
+    uniform float uAmbientIntensity; // 0.0 - 1.0-ish
+
     vec3 computeBlur(sampler2D tex, vec2 uv, vec2 texel, float maxRadius) {
         vec3 result = vec3(0.0);
         
@@ -243,6 +247,15 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
                     blendOverlayChannel(base.b, blend.b));
     }
 
+    vec3 cctToTint(float cctKelvin) {
+        // Simple, robust warm<->cool tint anchored at neutral daylight (6500K) = white (1,1,1).
+        // Below 6500K (warmer/incandescent-ish): shift toward orange. Above (cooler/shade/overcast): shift toward blue.
+        float t = clamp((cctKelvin - 6500.0) / 3500.0, -1.0, 1.0);
+        vec3 warmTint = vec3(1.0, 0.82, 0.65);
+        vec3 coolTint = vec3(0.75, 0.85, 1.0);
+        return t < 0.0 ? mix(vec3(1.0), warmTint, -t) : mix(vec3(1.0), coolTint, t);
+    }
+
     void main() {
         vec4 origColor = texture2D(sCameraTex, vTexCoord);
         vec4 mask = texture2D(sMaskTex, vTexCoord);
@@ -273,7 +286,8 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             // --- FOUNDATION COLOR & FINISH ---
             float skinLuma = dot(blurred, vec3(0.299, 0.587, 0.114));
             vec3 litFoundation = uFoundationColor.rgb * (skinLuma * 0.85 + 0.15);
-            
+            litFoundation *= mix(vec3(1.0), cctToTint(uAmbientCCT), clamp(uAmbientIntensity, 0.0, 1.0));
+
             float effectiveOpacity = clamp(uFoundationColor.a, 0.0, 1.0);
             float darkBlend = 1.0 - smoothstep(0.30, 0.38, skinLuma);
             effectiveOpacity = mix(effectiveOpacity, min(effectiveOpacity, 0.65), darkBlend);
@@ -503,6 +517,8 @@ struct RendererContext {
     GLint fndScaleHandle;
     GLint fndOffsetHandle;
     GLint fndBoundsHandle;
+    GLint fndAmbientCctHandle;
+    GLint fndAmbientIntensityHandle;
 
     // --- Makeup Mesh Program (Blush, Contour rendered directly on face mesh) ---
     GLuint makeupWeightProgram;
@@ -542,6 +558,9 @@ struct RendererContext {
     int contourStyle = 0;   // 0=normal, 1=slim, 2=pinch, 3=straighten (drives live nose contour+highlight geometry)
     int blushStyle = 0;     // 0=normal, 1=contour_45, 2=horizontal
     int concealerStyle = 0; // 0=Traditional, 1=Facelift, 2=Green, 3=Peach
+
+    float ambientCctKelvin = 6500.0f; // Neutral D65 daylight default — safe no-op tint until real data arrives
+    float ambientIntensity = 1.0f;    // Neutral (no darkening) default
 
     // Morphology cache (updated at ~5fps to avoid overhead)
     std::string lastFaceShape = "";
@@ -610,6 +629,8 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     gCtx.fndScaleHandle = glGetUniformLocation(gCtx.foundationProgram, "uScale");
     gCtx.fndOffsetHandle = glGetUniformLocation(gCtx.foundationProgram, "uOffset");
     gCtx.fndBoundsHandle = glGetUniformLocation(gCtx.foundationProgram, "uFaceBounds");
+    gCtx.fndAmbientCctHandle = glGetUniformLocation(gCtx.foundationProgram, "uAmbientCCT");
+    gCtx.fndAmbientIntensityHandle = glGetUniformLocation(gCtx.foundationProgram, "uAmbientIntensity");
 
     // Validation logging for foundation shader handles
     if (gCtx.fndPositionHandle == -1) LOGE("Foundation shader: attribute 'aPosition' not found");
@@ -633,6 +654,8 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     if (gCtx.fndScaleHandle == -1) LOGE("Foundation shader: uniform 'uScale' not found");
     if (gCtx.fndOffsetHandle == -1) LOGE("Foundation shader: uniform 'uOffset' not found");
     if (gCtx.fndBoundsHandle == -1) LOGE("Foundation shader: uniform 'uFaceBounds' not found");
+    if (gCtx.fndAmbientCctHandle == -1) LOGE("Foundation shader: uniform 'uAmbientCCT' not found");
+    if (gCtx.fndAmbientIntensityHandle == -1) LOGE("Foundation shader: uniform 'uAmbientIntensity' not found");
 
     // Blur Shader
     gCtx.blurProgram = createProgram(BLUR_VERTEX_SHADER, BLUR_FRAGMENT_SHADER);
@@ -1210,6 +1233,8 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
     glUniform4fv(gCtx.fndLipstickColorHandle, 1, gCtx.lipstickColor);
     glUniform4fv(gCtx.fndConcealerColorHandle, 1, gCtx.concealerColor);
     glUniform1i(gCtx.fndConcealerStyleHandle, gCtx.concealerStyle);
+    glUniform1f(gCtx.fndAmbientCctHandle, gCtx.ambientCctKelvin);
+    glUniform1f(gCtx.fndAmbientIntensityHandle, gCtx.ambientIntensity);
 
     glVertexAttribPointer(gCtx.fndPositionHandle, 2, GL_FLOAT, GL_FALSE, 0, QUAD_VERTICES);
     glEnableVertexAttribArray(gCtx.fndPositionHandle);
@@ -1244,6 +1269,12 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeSetMakeup(JNIEnv* env, jclass c
 JNIEXPORT void JNICALL
 Java_com_matchandbeauty_FizgravityRenderer_nativeSetFoundationBlur(JNIEnv* env, jclass clazz, jfloat radius) {
     gCtx.foundationBlurRadius = radius;
+}
+
+JNIEXPORT void JNICALL
+Java_com_matchandbeauty_FizgravityRenderer_nativeSetAmbientLighting(JNIEnv* env, jclass clazz, jfloat cctKelvin, jfloat intensity) {
+    gCtx.ambientCctKelvin = cctKelvin;
+    gCtx.ambientIntensity = intensity;
 }
 
 JNIEXPORT void JNICALL

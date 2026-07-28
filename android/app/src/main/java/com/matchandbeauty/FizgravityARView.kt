@@ -79,6 +79,14 @@ class FizgravityARView @JvmOverloads constructor(
     private external fun fizgravityCalculateHairlineBlending(
         enginePtr: Long
     ): FloatArray?
+    // fizgravityEstimateLighting(enginePtr, cameraBuffer, width, height, rowStride) →
+    // FloatArray? [cctKelvin, intensity], or null on failure. cameraBuffer must be a
+    // DIRECT ByteBuffer of RGB 24-bit interleaved pixels (3 bytes/pixel) — see
+    // Fizgravity-AR-Engine's lighting::LightingEstimator::estimate_ambient_sh for the
+    // face-as-light-probe technique this wraps.
+    private external fun fizgravityEstimateLighting(
+        enginePtr: Long, cameraBuffer: ByteBuffer, width: Int, height: Int, rowStride: Int
+    ): FloatArray?
     private external fun fizgravityPushImu(
         enginePtr: Long, gx: Float, gy: Float, gz: Float, ax: Float, ay: Float, az: Float, timestampSec: Float
     ): Int
@@ -117,6 +125,20 @@ class FizgravityARView @JvmOverloads constructor(
     private var trackingSourceBitmap: Bitmap? = null
     private var trackingBitmap: Bitmap? = null
     private var trackingCanvas: Canvas? = null
+
+    // Ambient lighting estimation input — the Rust face-as-light-probe algorithm only
+    // samples ~280 specific landmark-mapped pixels (skin-region points out of 468), so
+    // feeding it the full 640px-wide trackingBitmap would mean converting hundreds of
+    // thousands of pixels ARGB->RGB per call just to touch a few hundred of them. A
+    // small dedicated downscale is more than enough precision for a diffuse ambient
+    // estimate (the original, since-replaced algorithm only used a 16x16 grid).
+    private var lightingBitmap: Bitmap? = null
+    private var lightingCanvas: Canvas? = null
+    private var lightingRgbaBuffer: ByteBuffer? = null
+    private var lightingRgbBuffer: ByteBuffer? = null
+    private val LIGHTING_SIZE = 128
+    private var lightingFrameCounter = 0
+    private val LIGHTING_FRAME_INTERVAL = 5
     private val TRACKING_WIDTH = 640
     
     private val renderLock = Any()
@@ -661,6 +683,63 @@ class FizgravityARView @JvmOverloads constructor(
                                     }
                                     if (stabilized != null && stabilized.size == fa.size) {
                                         finalLandmarks = stabilized
+                                    }
+
+                                    // Ambient lighting estimation — throttled. Lighting changes slowly
+                                    // relative to face expression, so it doesn't need every-frame cadence,
+                                    // and the native call re-samples the just-pushed face mesh above.
+                                    lightingFrameCounter++
+                                    if (lightingFrameCounter >= LIGHTING_FRAME_INTERVAL) {
+                                        lightingFrameCounter = 0
+                                        val srcBmp = trackingBitmap
+                                        if (srcBmp != null) {
+                                            if (lightingBitmap == null) {
+                                                lightingBitmap = Bitmap.createBitmap(LIGHTING_SIZE, LIGHTING_SIZE, Bitmap.Config.ARGB_8888)
+                                                lightingCanvas = Canvas(lightingBitmap!!)
+                                            }
+                                            lightingCanvas!!.drawBitmap(
+                                                srcBmp,
+                                                Rect(0, 0, srcBmp.width, srcBmp.height),
+                                                Rect(0, 0, LIGHTING_SIZE, LIGHTING_SIZE),
+                                                null
+                                            )
+
+                                            val pixelCount = LIGHTING_SIZE * LIGHTING_SIZE
+                                            if (lightingRgbaBuffer == null) {
+                                                lightingRgbaBuffer = ByteBuffer.allocateDirect(pixelCount * 4)
+                                            }
+                                            if (lightingRgbBuffer == null) {
+                                                lightingRgbBuffer = ByteBuffer.allocateDirect(pixelCount * 3)
+                                            }
+                                            val rgbaBuf = lightingRgbaBuffer!!
+                                            val rgbBuf = lightingRgbBuffer!!
+                                            rgbaBuf.rewind()
+                                            lightingBitmap!!.copyPixelsToBuffer(rgbaBuf)
+                                            rgbBuf.rewind()
+                                            // ARGB_8888 bitmaps store raw bytes as R,G,B,A per pixel —
+                                            // strip the alpha byte to match the RGB 24-bit contract
+                                            // fizgravityEstimateLighting expects.
+                                            for (p in 0 until pixelCount) {
+                                                val base = p * 4
+                                                rgbBuf.put(rgbaBuf.get(base))
+                                                rgbBuf.put(rgbaBuf.get(base + 1))
+                                                rgbBuf.put(rgbaBuf.get(base + 2))
+                                            }
+                                            rgbBuf.rewind()
+
+                                            try {
+                                                val lighting = synchronized(engineLock) {
+                                                    fizgravityEstimateLighting(
+                                                        enginePtr, rgbBuf, LIGHTING_SIZE, LIGHTING_SIZE, LIGHTING_SIZE * 3
+                                                    )
+                                                }
+                                                if (lighting != null && lighting.size == 2) {
+                                                    FizgravityRenderer.nativeSetAmbientLighting(lighting[0], lighting[1])
+                                                }
+                                            } catch (e: Exception) {
+                                                Log.w("FizgravityARView", "Lighting estimation error: ${e.message}")
+                                            }
+                                        }
                                     }
                                 } catch (e: Exception) {
                                     Log.w("FizgravityARView", "Engine call failed, using MediaPipe direct: ${e.message}")

@@ -28,6 +28,7 @@ typedef int     (*FnFizGetPredictedLandmarks)(void*, float*, int, float);
 typedef int     (*FnFizGetStabilizedLandmarks)(void*, float*, int);
 typedef int     (*FnFizCalculateDynamicAO)(void*, float*, int);
 typedef int     (*FnFizCalculateHairlineBlending)(void*, float*, int);
+typedef int     (*FnFizEstimateLighting)(void*, const void*, int, int, int, size_t, float*, float*);
 
 // Handle ke library Fizgravity yang dimuat secara lazy
 static void* gFizLibHandle = nullptr;
@@ -39,6 +40,7 @@ static FnFizGetPredictedLandmarks gFizGetPredicted   = nullptr;
 static FnFizGetStabilizedLandmarks gFizGetStabilized = nullptr;
 static FnFizCalculateDynamicAO gFizCalculateDynamicAO = nullptr;
 static FnFizCalculateHairlineBlending gFizCalculateHairlineBlending = nullptr;
+static FnFizEstimateLighting   gFizEstimateLighting   = nullptr;
 static bool                   gFizLoaded             = false;
 
 // ── Lazy-load libfizgravity_ar.so saat pertama kali dibutuhkan ─────────────────
@@ -72,8 +74,9 @@ static bool ensureFizgravityLoaded() {
     gFizGetStabilized=(FnFizGetStabilizedLandmarks)dlsym(gFizLibHandle, "fizgravity_engine_get_stabilized_landmarks");
     gFizCalculateDynamicAO=(FnFizCalculateDynamicAO)dlsym(gFizLibHandle, "fizgravity_engine_calculate_dynamic_ao");
     gFizCalculateHairlineBlending=(FnFizCalculateHairlineBlending)dlsym(gFizLibHandle, "fizgravity_engine_calculate_hairline_blending");
+    gFizEstimateLighting=(FnFizEstimateLighting)dlsym(gFizLibHandle, "fizgravity_engine_estimate_lighting");
 
-    if (!gFizInit || !gFizRelease || !gFizPushImu || !gFizSetFaceMesh || !gFizGetPredicted || !gFizGetStabilized || !gFizCalculateDynamicAO || !gFizCalculateHairlineBlending) {
+    if (!gFizInit || !gFizRelease || !gFizPushImu || !gFizSetFaceMesh || !gFizGetPredicted || !gFizGetStabilized || !gFizCalculateDynamicAO || !gFizCalculateHairlineBlending || !gFizEstimateLighting) {
         LOGE("dlsym failed — missing symbols in libfizgravity_ar.so: %s", dlerror());
         dlclose(gFizLibHandle);
         gFizLibHandle = nullptr;
@@ -256,6 +259,35 @@ Java_com_matchandbeauty_FizgravityARView_fizgravityCalculateHairlineBlending(
     if (result == nullptr) return nullptr; // OOM
     env->SetFloatArrayRegion(result, 0, n, out_buf);
     return result;
+}
+
+// fizgravityEstimateLighting(enginePtr, cameraBuffer, width, height, rowStride) → FloatArray? [cctKelvin, intensity], atau null kalau gagal
+JNIEXPORT jfloatArray JNICALL
+Java_com_matchandbeauty_FizgravityARView_fizgravityEstimateLighting(
+    JNIEnv* env, jobject thiz,
+    jlong enginePtr, jobject cameraBuffer, jint width, jint height, jint rowStride)
+{
+    if (!gFizLoaded || gFizEstimateLighting == nullptr) return nullptr;
+    void* ptr = (void*)(uintptr_t)enginePtr;
+    if (ptr == nullptr || cameraBuffer == nullptr) return nullptr;
+
+    // Pakai alamat & kapasitas NYATA buffer langsung (bukan width*height*3 turunan),
+    // sesuai konvensi buffer_len_bytes otoritatif yang dipakai lighting.rs.
+    void* bufPtr = env->GetDirectBufferAddress(cameraBuffer);
+    jlong bufCapacity = env->GetDirectBufferCapacity(cameraBuffer);
+    if (bufPtr == nullptr || bufCapacity <= 0) return nullptr;
+
+    float cct = 0.0f;
+    float intensity = 0.0f;
+    int result = gFizEstimateLighting(ptr, bufPtr, width, height, rowStride, (size_t)bufCapacity, &cct, &intensity);
+
+    if (result != 0) return nullptr;
+
+    jfloatArray out = env->NewFloatArray(2);
+    if (out == nullptr) return nullptr; // OOM
+    float values[2] = { cct, intensity };
+    env->SetFloatArrayRegion(out, 0, 2, values);
+    return out;
 }
 
 } // extern "C"

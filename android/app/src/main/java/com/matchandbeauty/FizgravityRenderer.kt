@@ -19,4 +19,5 @@ object FizgravityRenderer {
     @JvmStatic external fun nativeSetMakeupStyle(regionType: Int, style: Int)
     @JvmStatic external fun nativeSetFoundationBlur(radius: Float)
     @JvmStatic external fun nativeSetConcealerStyle(style: Int)
+    @JvmStatic external fun nativeSetAmbientLighting(cctKelvin: Float, intensity: Float)
 }
