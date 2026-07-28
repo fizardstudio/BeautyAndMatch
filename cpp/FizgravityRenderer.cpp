@@ -266,20 +266,37 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
 
         // faceMask = broad "are we anywhere on the tracked face" gate, used by every
         // layer EXCEPT foundation. foundationMask is narrower: it additionally excludes
-        // the outer lip surface (via the already-baked lipRawMask, same soft per-vertex
-        // falloff as the LIPSTICK layer, no new geometry needed) so foundation color
+        // the outer lip surface (via the same sharpened lip mask the LIPSTICK layer
+        // uses below, no new geometry needed) so foundation color
         // never sits underneath lipstick's multiply blend — real MUA technique leaves
         // lips untouched by general face foundation (dedicated neutral lip primer is a
         // separate, deliberately-restrained product, not the user's arbitrary foundation
         // shade at full strength), and multiply is the least forgiving blend mode for a
         // non-neutral color like this app's user-picked foundation to sit underneath.
         float faceMask = mask.r;
+
+        // lipRawMask is baked by linearly interpolating vertex alpha (1.0 at LIP_INDICES,
+        // 0.0 at every other mesh vertex) across whatever triangles border the lip
+        // landmarks — the transition width is incidental to local mesh triangle size, not
+        // a deliberately tuned feather. Confirmed empirically: a saturated test lipstick
+        // color visibly bled onto the mustache/chin/cheek skin, well past the vermilion
+        // border. Sharpen at the natural ~50% crossover so the effective boundary tracks
+        // the actual lip edge instead of that incidental triangle-size width.
         float lipRawMask = texture2D(sLipMaskTex, vTexCoord).r;
-        float foundationMask = faceMask * (1.0 - lipRawMask);
+        float lipMask = smoothstep(0.4, 0.6, lipRawMask);
+
+        float foundationMask = faceMask * (1.0 - lipMask);
         float contourAlpha   = mask.g * faceMask;
         float blushAlpha     = mask.b * faceMask;
         float highlightAlpha = mask.a * faceMask;
-        float lipAlpha       = lipRawMask * faceMask;
+        // NOT gated by faceMask: faceMask carries the PASS-1 hard hole cut for
+        // INNER_LIPS_INDICES (meant to keep foundation/general skin smoothing out of an
+        // OPEN mouth's cavity), which sits right along the inner lip seam — the same seam
+        // that's still real lip surface when the mouth is closed. Gating lipAlpha by
+        // faceMask made lipstick visibly gap open along that seam even with the mouth
+        // shut (confirmed on-device). lipMask is already tightly scoped to the lip
+        // landmarks on its own and doesn't need the broader face gate.
+        float lipAlpha       = lipMask;
         float eyeAlpha       = texture2D(sEyeMaskTex, vTexCoord).r * faceMask;
         float concealerAlpha = texture2D(sConcealerMaskTex, vTexCoord).r * faceMask;
 
@@ -1057,15 +1074,59 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
             glVertexAttribPointer(gCtx.mkPositionHandle, 3, GL_FLOAT, GL_FALSE, 0, data);
             glEnableVertexAttribArray(gCtx.mkPositionHandle);
             {
-                static float lipVertexAlpha[468] = {0.0f};
-                for (int i = 0; i < 468; i++) lipVertexAlpha[i] = 0.0f;
-                const int lipCount = sizeof(LIP_INDICES) / sizeof(LIP_INDICES[0]);
-                for (int i = 0; i < lipCount; i++) {
-                    lipVertexAlpha[LIP_INDICES[i]] = 1.0f;
+                // Feathering weights (ported from calculate_lip_feathering): outer
+                // contour fades to 0.15 (not a hard 0 — a gentle feather against the
+                // now-tightly-bounded triangulation below), inner contour stays full
+                // 1.0, MediaPipe's secondary mid-lip landmarks get an intermediate 0.65
+                // for a smoother gradient across the band. Only vertices actually
+                // referenced by lipTriangleIndices below matter — the rest of this
+                // array is never sampled since nothing else gets drawn in this pass.
+                static float lipVertexAlpha[468];
+                for (int i = 0; i < 11; i++) {
+                    lipVertexAlpha[UPPER_LIP_OUTER[i]] = 0.15f;
+                    lipVertexAlpha[LOWER_LIP_OUTER[i]] = 0.15f;
+                    lipVertexAlpha[UPPER_LIP_INNER[i]] = 1.0f;
+                    lipVertexAlpha[LOWER_LIP_INNER[i]] = 1.0f;
                 }
+                static const unsigned short midLipIndices[] = {37, 0, 267, 81, 82, 13, 312, 311, 14, 87, 178, 317};
+                for (int i = 0; i < 12; i++) lipVertexAlpha[midLipIndices[i]] = 0.65f;
+
+                // Dedicated lip-only triangle list: outer-to-inner contour quad-strip
+                // for upper and lower lip (see FizgravityMakeupIndices.h for why this
+                // replaces drawing the full-face MESH_INDICES here) — tightly bounded,
+                // can never reach a vertex outside the lip band.
+                static unsigned short lipTriangleIndices[120];
+                int lipIdx = 0;
+                for (int i = 0; i < 10; i++) {
+                    lipTriangleIndices[lipIdx++] = UPPER_LIP_OUTER[i];
+                    lipTriangleIndices[lipIdx++] = UPPER_LIP_OUTER[i + 1];
+                    lipTriangleIndices[lipIdx++] = UPPER_LIP_INNER[i];
+                    lipTriangleIndices[lipIdx++] = UPPER_LIP_INNER[i];
+                    lipTriangleIndices[lipIdx++] = UPPER_LIP_OUTER[i + 1];
+                    lipTriangleIndices[lipIdx++] = UPPER_LIP_INNER[i + 1];
+                }
+                for (int i = 0; i < 10; i++) {
+                    lipTriangleIndices[lipIdx++] = LOWER_LIP_OUTER[i];
+                    lipTriangleIndices[lipIdx++] = LOWER_LIP_OUTER[i + 1];
+                    lipTriangleIndices[lipIdx++] = LOWER_LIP_INNER[i];
+                    lipTriangleIndices[lipIdx++] = LOWER_LIP_INNER[i];
+                    lipTriangleIndices[lipIdx++] = LOWER_LIP_OUTER[i + 1];
+                    lipTriangleIndices[lipIdx++] = LOWER_LIP_INNER[i + 1];
+                }
+
                 glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, lipVertexAlpha);
                 glEnableVertexAttribArray(gCtx.mkAlphaHandle);
-                glDrawElements(GL_TRIANGLES, numIndices, GL_UNSIGNED_SHORT, MESH_INDICES);
+                // GL_CULL_FACE is still enabled from PASS 1 (glCullFace(GL_BACK),
+                // glFrontFace(GL_CW), only disabled later at the end of this whole
+                // baking sequence) — this is a mask-baking pass, not 3D solid geometry,
+                // so winding direction is irrelevant to what we want (rasterize the
+                // alpha data regardless of triangle orientation). The hand-built
+                // upper/lower quad-strips above don't have guaranteed-consistent
+                // winding relative to each other, and confirmed on-device: with culling
+                // on, the upper lip triangles were silently discarded entirely (zero
+                // coverage) while the lower lip rendered fine.
+                glDisable(GL_CULL_FACE);
+                glDrawElements(GL_TRIANGLES, lipIdx, GL_UNSIGNED_SHORT, lipTriangleIndices);
             }
             glDisableVertexAttribArray(gCtx.mkPositionHandle);
             glDisableVertexAttribArray(gCtx.mkAlphaHandle);

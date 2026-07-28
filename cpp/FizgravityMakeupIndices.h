@@ -7,6 +7,22 @@ static const unsigned short LIP_INDICES[] = {
     0, 11, 12, 13, 14, 15, 16, 17, 37, 38, 39, 40, 41, 42, 61, 62, 72, 73, 74, 76, 77, 78, 80, 81, 82, 84, 85, 86, 87, 88, 89, 90, 91, 95, 96, 146, 178, 179, 180, 181, 183, 184, 185, 191, 267, 268, 269, 270, 271, 272, 291, 292, 302, 303, 304, 306, 307, 308, 310, 311, 312, 314, 315, 316, 317, 318, 319, 320, 321, 324, 325, 375, 402, 403, 404, 405, 407, 408, 409, 415
 };
 
+// Dedicated lip-only contour rings, ported from Fizgravity-AR-Engine's
+// src/makeup_triangulator.rs (get_upper_lip_triangles/get_lower_lip_triangles +
+// calculate_lip_feathering — that Rust code already existed but was never wired into
+// this renderer). Used to build a lip-only triangle list for baking the lip mask,
+// instead of drawing the full-face MESH_INDICES triangulation with per-vertex 0/1 alpha
+// — the full-mesh approach's transition width was incidental to however large the
+// triangles bordering the lip happened to be (confirmed on-device: a saturated test
+// lipstick color bled visibly onto the mustache/chin/cheek skin). A triangulation
+// bounded to just the outer->inner lip band can't reach a vertex outside that band at
+// all, which fixes the bleeding at the geometry level rather than papering over it with
+// a sharper shader-side threshold.
+static const unsigned short UPPER_LIP_OUTER[] = {61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291};
+static const unsigned short UPPER_LIP_INNER[] = {78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308};
+static const unsigned short LOWER_LIP_OUTER[] = {61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291};
+static const unsigned short LOWER_LIP_INNER[] = {78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308};
+
 static const unsigned short EYE_INDICES[] = {
     // Left eye + eyeshadow region + inner eyeball
     33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 112, 26, 22, 23, 24, 110, 25,
