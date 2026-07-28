@@ -521,6 +521,8 @@ struct RendererContext {
     FBO eyeMaskFbo;
     FBO concealerMaskFbo;
     FBO auxMaskFbo; // R=dynamicAO, G=hairlineBlend
+    FBO auxMaskBlurFbo; // Blurred copy of auxMaskFbo — smooths per-vertex interpolation
+                         // banding from the sparse forehead/nose landmark density.
 
     float foundationColor[4] = {0.0f, 1.0f, 1.0f, 0.0f};
     float contourColor[4] = {0.3f, 0.15f, 0.1f, 0.0f};
@@ -653,6 +655,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeResize(JNIEnv* env, jclass claz
     gCtx.eyeMaskFbo.setup(width, height, false);
     gCtx.concealerMaskFbo.setup(width, height, false);
     gCtx.auxMaskFbo.setup(width, height, false);
+    gCtx.auxMaskBlurFbo.setup(width, height, false);
 
     float screenAspect = (float)height / (float)width;
     float cameraAspect = 16.0f / 9.0f; // Typical portrait
@@ -1173,6 +1176,33 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
     glDisableVertexAttribArray(gCtx.blurPositionHandle);
     glDisableVertexAttribArray(gCtx.blurTexCoordHandle);
 
+    // --- PASS 2b: Blur The Auxiliary Mask (Dynamic AO + Hairline Blend) ---
+    // auxMaskFbo is baked per-vertex from only 468 sparse landmarks (same as
+    // maskFbo), but unlike maskFbo it was never run through a smoothing pass —
+    // so the hairline fade showed up as a visible banding line across the
+    // forehead instead of a gradient, wherever two adjacent mesh vertices had
+    // a large alpha delta. Same blur program/radius as PASS 2 for consistency.
+    glBindFramebuffer(GL_FRAMEBUFFER, gCtx.auxMaskBlurFbo.fbo);
+    glViewport(0, 0, gCtx.width, gCtx.height);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(gCtx.blurProgram);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, gCtx.auxMaskFbo.texture);
+    glUniform1i(gCtx.blurSamplerHandle, 0);
+    glUniform2f(gCtx.blurTexelSizeHandle, 3.0f / gCtx.width, 3.0f / gCtx.height);
+
+    glVertexAttribPointer(gCtx.blurPositionHandle, 2, GL_FLOAT, GL_FALSE, 0, QUAD_VERTICES);
+    glEnableVertexAttribArray(gCtx.blurPositionHandle);
+    glVertexAttribPointer(gCtx.blurTexCoordHandle, 2, GL_FLOAT, GL_FALSE, 0, FBO_TEX_COORDS);
+    glEnableVertexAttribArray(gCtx.blurTexCoordHandle);
+
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    glDisableVertexAttribArray(gCtx.blurPositionHandle);
+    glDisableVertexAttribArray(gCtx.blurTexCoordHandle);
+
     // --- PASS 3: Apply Foundation & Render to Screen ---
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, gCtx.width, gCtx.height);
@@ -1205,9 +1235,9 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
     glBindTexture(GL_TEXTURE_2D, gCtx.concealerMaskFbo.texture);
     glUniform1i(gCtx.fndConcealerMaskTexHandle, 4);
 
-    // Bind Auxiliary Mask FBO (dynamic AO + hairline blend) to Texture Unit 5
+    // Bind blurred Auxiliary Mask FBO (dynamic AO + hairline blend) to Texture Unit 5
     glActiveTexture(GL_TEXTURE5);
-    glBindTexture(GL_TEXTURE_2D, gCtx.auxMaskFbo.texture);
+    glBindTexture(GL_TEXTURE_2D, gCtx.auxMaskBlurFbo.texture);
     glUniform1i(gCtx.fndAuxMaskTexHandle, 5);
 
     glUniform2f(gCtx.fndScaleHandle, gCtx.scaleX, gCtx.scaleY);
