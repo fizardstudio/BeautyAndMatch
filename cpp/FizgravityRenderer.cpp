@@ -237,7 +237,7 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
         float dynamicAO = auxMask.r;
         float hairlineBlend = auxMask.g;
 
-        float foundationMask = mask.r; // DIAGNOSTIC: hairlineBlend multiply temporarily disabled
+        float foundationMask = mask.r * hairlineBlend;
         float contourAlpha   = mask.g * foundationMask;
         float blushAlpha     = mask.b * foundationMask;
         float highlightAlpha = mask.a * foundationMask;
@@ -361,7 +361,7 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             vec3 lipMultiply = currentSkin * uLipstickColor.rgb;
             currentSkin = mix(currentSkin, lipMultiply, lipAlpha * uLipstickColor.a);
 
-            // currentSkin *= dynamicAO; // DIAGNOSTIC: temporarily disabled
+            currentSkin *= dynamicAO;
             gl_FragColor = vec4(currentSkin, origColor.a);
         } else {
             gl_FragColor = origColor;
@@ -622,6 +622,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     if (gCtx.fndEyeshadowColorHandle == -1) LOGE("Foundation shader: uniform 'uEyeshadowColor' not found");
     if (gCtx.fndEyeMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sEyeMaskTex' not found");
     if (gCtx.fndConcealerColorHandle == -1) LOGE("Foundation shader: uniform 'uConcealerColor' not found");
+    if (gCtx.fndAuxMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sAuxMaskTex' not found"); else LOGI("Foundation shader: sAuxMaskTex resolved to location %d", gCtx.fndAuxMaskTexHandle);
     if (gCtx.fndConcealerMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sConcealerMaskTex' not found");
     if (gCtx.fndConcealerStyleHandle == -1) LOGE("Foundation shader: uniform 'uConcealerStyle' not found");
     if (gCtx.fndScaleHandle == -1) LOGE("Foundation shader: uniform 'uScale' not found");
@@ -1084,10 +1085,19 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
             // = hairline blend (1.0 = full makeup, fades to 0 at hairline).
             // Two separate draw calls into the same FBO via glColorMask so
             // each writes only its own channel without clobbering the
-            // other. Default-clear to (1,1,0,0) first so any screen area
-            // not covered by the face mesh stays neutral (no darkening,
-            // no fade) rather than defaulting to black/zero.
+            // other. Default-clear to (1,1,0,0) UNCONDITIONALLY every frame
+            // first, so the whole texture stays neutral (no darkening, no
+            // hairline fade) whenever the Rust engine data is unavailable —
+            // this must run even when dynamicAO/hairlineBlend are null,
+            // otherwise auxMaskFbo is left at its post-setup() zero-fill and
+            // every makeup layer gets silently gated to zero via
+            // foundationMask *= hairlineBlend in the compositing shader.
             // ============================================================
+            glBindFramebuffer(GL_FRAMEBUFFER, gCtx.auxMaskFbo.fbo);
+            glViewport(0, 0, gCtx.width, gCtx.height);
+            glClearColor(1.0f, 1.0f, 0.0f, 0.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+
             if (dynamicAO != nullptr && hairlineBlend != nullptr) {
                 jsize aoLen = env->GetArrayLength(dynamicAO);
                 jsize hairlineLen = env->GetArrayLength(hairlineBlend);
@@ -1095,11 +1105,6 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
                     jboolean isCopyAO = JNI_FALSE, isCopyHair = JNI_FALSE;
                     float* aoData = env->GetFloatArrayElements(dynamicAO, &isCopyAO);
                     float* hairlineData = env->GetFloatArrayElements(hairlineBlend, &isCopyHair);
-
-                    glBindFramebuffer(GL_FRAMEBUFFER, gCtx.auxMaskFbo.fbo);
-                    glViewport(0, 0, gCtx.width, gCtx.height);
-                    glClearColor(1.0f, 1.0f, 0.0f, 0.0f);
-                    glClear(GL_COLOR_BUFFER_BIT);
 
                     glUseProgram(gCtx.makeupWeightProgram);
                     glUniform2f(gCtx.mkScaleHandle, gCtx.scaleX, gCtx.scaleY);

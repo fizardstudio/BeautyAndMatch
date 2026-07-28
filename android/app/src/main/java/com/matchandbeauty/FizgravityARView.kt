@@ -437,7 +437,42 @@ class FizgravityARView @JvmOverloads constructor(
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         cameraProviderFuture.addListener({
             cameraProvider = cameraProviderFuture.get()
-            
+
+            val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+
+            // Resolve real device capabilities BEFORE requesting capture options — Android
+            // does not document a consistent, safe behavior for setCaptureRequestOption()
+            // with an unsupported value (vendor-dependent: silently ignored, clamped, or a
+            // failed capture depending on device/driver). This was only ever validated on
+            // one physical test device; querying CameraCharacteristics at runtime and
+            // skipping/falling back on anything not actually listed as available is the
+            // only way to be safe on hardware we can't personally test on.
+            val camera2Info = try {
+                val info = cameraSelector.filter(cameraProvider!!.availableCameraInfos).firstOrNull()
+                if (info != null) androidx.camera.camera2.interop.Camera2CameraInfo.from(info) else null
+            } catch (e: Exception) {
+                Log.w("FizgravityARView", "Could not resolve Camera2CameraInfo for capability check: ${e.message}")
+                null
+            }
+
+            val stabilizationModes = camera2Info?.getCameraCharacteristic(
+                android.hardware.camera2.CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES
+            )
+            val supportsVideoStabilization = stabilizationModes?.contains(
+                android.hardware.camera2.CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+            ) == true
+
+            val desiredFpsRange = android.util.Range(10, 30)
+            val availableFpsRanges = camera2Info?.getCameraCharacteristic(
+                android.hardware.camera2.CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES
+            )
+            val chosenFpsRange = availableFpsRanges?.let { ranges ->
+                ranges.firstOrNull { it == desiredFpsRange }
+                    ?: ranges.minByOrNull {
+                        kotlin.math.abs(it.lower - desiredFpsRange.lower) + kotlin.math.abs(it.upper - desiredFpsRange.upper)
+                    }
+            }
+
             val resolutionSelector = androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
                 // Target is given in the sensor's native (landscape) coordinate space,
                 // matching how Camera2's stream configuration list reports sizes —
@@ -480,15 +515,33 @@ class FizgravityARView @JvmOverloads constructor(
             // certainly has this on by default for its Preview; this app was never
             // requesting it at all, leaving raw handheld shake fully visible — worse here
             // than in the stock app because the tight selfie framing amplifies any shake.
-            androidx.camera.camera2.interop.Camera2Interop.Extender(imageAnalysisBuilder)
-                .setCaptureRequestOption(
+            val camera2Extender = androidx.camera.camera2.interop.Camera2Interop.Extender(imageAnalysisBuilder)
+
+            // Only request a range Camera2CameraInfo actually listed as available; fall back
+            // to the closest one rather than forcing our hardcoded (10,30) blind.
+            if (chosenFpsRange != null) {
+                camera2Extender.setCaptureRequestOption(
                     android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                    android.util.Range(10, 30)
+                    chosenFpsRange
                 )
-                .setCaptureRequestOption(
+            } else {
+                Log.w("FizgravityARView", "No AE target fps range info available — leaving AE range unconstrained")
+            }
+
+            // Only request video stabilization if the device's CameraCharacteristics actually
+            // list ON as supported — Android doesn't guarantee graceful handling of an
+            // unsupported value here (vendor-dependent: silently ignored, clamped, or a
+            // failed capture, per Camera2Interop.Extender's own docs).
+            if (supportsVideoStabilization) {
+                camera2Extender.setCaptureRequestOption(
                     android.hardware.camera2.CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
                     android.hardware.camera2.CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
                 )
+            } else {
+                Log.w("FizgravityARView", "Device does not list CONTROL_VIDEO_STABILIZATION_MODE_ON as supported — skipping EIS request")
+            }
+
+            camera2Extender
                 // Verify the HAL actually honors the requested mode instead of silently
                 // ignoring an unsupported/rejected key (which would show no error at all).
                 .setSessionCaptureCallback(object : android.hardware.camera2.CameraCaptureSession.CaptureCallback() {
@@ -706,7 +759,6 @@ class FizgravityARView @JvmOverloads constructor(
                 }
             }
 
-            val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
             try {
                 cameraProvider?.unbindAll()
                 val lifecycleOwner = getLifecycleOwner()
