@@ -472,8 +472,9 @@ const styles = StyleSheet.create({
   },
   compareDividerHandle: {
     position: 'absolute',
-    top: '50%',
-    marginTop: -20,
+    bottom: 150, // Kept low, clear of the bottom dock but off the face (which usually
+                 // sits mid/upper-frame in a selfie) — not vertically centered, which
+                 // would land the handle right over the eyes/nose being compared.
     width: 40,
     height: 40,
     borderRadius: 20,
