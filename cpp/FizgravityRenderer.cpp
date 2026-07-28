@@ -279,7 +279,14 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             vec3 highFreq = origColor.rgb - blurred;
             
             vec3 currentSkin = origColor.rgb;
-            
+
+            // Ambient-light color tint, shared by every pigmented makeup layer below —
+            // computed once so foundation/concealer/contour/blush/highlight/eyeshadow/
+            // lipstick all respond consistently to the same estimated lighting, not just
+            // foundation. Real pigment under warm/cool light shifts the same way skin does.
+            vec3 ambientTint = mix(vec3(1.0), cctToTint(uAmbientCCT), clamp(uAmbientIntensity, 0.0, 1.0));
+            vec3 tintedFoundationColor = uFoundationColor.rgb * ambientTint;
+
             // --- PURE SMOOTHING (Independent of Foundation Color) ---
             // Slider goes from 0 to 20
             float smoothIntensity = clamp(uFoundationBlurRadius / 20.0, 0.0, 1.0);
@@ -289,8 +296,7 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             
             // --- FOUNDATION COLOR & FINISH ---
             float skinLuma = dot(blurred, vec3(0.299, 0.587, 0.114));
-            vec3 litFoundation = uFoundationColor.rgb * (skinLuma * 0.85 + 0.15);
-            litFoundation *= mix(vec3(1.0), cctToTint(uAmbientCCT), clamp(uAmbientIntensity, 0.0, 1.0));
+            vec3 litFoundation = tintedFoundationColor * (skinLuma * 0.85 + 0.15);
 
             float effectiveOpacity = clamp(uFoundationColor.a, 0.0, 1.0);
             float darkBlend = 1.0 - smoothstep(0.30, 0.38, skinLuma);
@@ -318,23 +324,23 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
                 float wetSpecular = pow(specAngle, 24.0) * 0.5 * highPointMask;
                 foundationEffect = blendScreen(foundationEffect, vec3(wetSpecular));
             } else if (uFoundationType == 2) {
-                vec3 sheerTarget = blendSoftLight(blurred, uFoundationColor.rgb);
+                vec3 sheerTarget = blendSoftLight(blurred, tintedFoundationColor);
                 vec3 coveredSkin = mix(blurred, sheerTarget, 0.45);
                 foundationEffect = coveredSkin + (highFreq * 0.95 * hfMultiplier);
             } else if (uFoundationType == 3) {
-                vec3 softLightTarget = blendSoftLight(blurred, uFoundationColor.rgb);
+                vec3 softLightTarget = blendSoftLight(blurred, tintedFoundationColor);
                 vec3 satinTarget = mix(litFoundation, softLightTarget, 0.5);
                 foundationEffect = satinTarget + (highFreq * 0.70 * hfMultiplier);
             } else if (uFoundationType == 4) {
-                vec3 overlayTarget = blendOverlay(blurred, uFoundationColor.rgb);
+                vec3 overlayTarget = blendOverlay(blurred, tintedFoundationColor);
                 vec3 luminousTarget = mix(litFoundation, overlayTarget, 0.4);
                 foundationEffect = luminousTarget + (highFreq * 0.75 * hfMultiplier);
-                
+
                 vec3 fauxNormal = normalize(vec3((vFaceUV.x - 0.5) * 1.5, (vFaceUV.y - 0.5) * 1.5, 0.9));
                 float NdV = max(0.0, dot(fauxNormal, vec3(0.0, 0.0, 1.0)));
                 float pearlGlow = (1.0 - NdV * 0.6) * smoothstep(0.3, 0.8, skinLuma) * 0.22;
-                
-                vec3 adaptivePearl = mix(vec3(1.0, 0.92, 0.82), uFoundationColor.rgb, 0.35);
+
+                vec3 adaptivePearl = mix(vec3(1.0, 0.92, 0.82), tintedFoundationColor, 0.35);
                 foundationEffect = blendScreen(foundationEffect, adaptivePearl * pearlGlow);
             }
             
@@ -342,6 +348,7 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             currentSkin = mix(currentSkin, foundationEffect, effectiveOpacity * foundationMask);
 
             // [2] CONCEALER
+            vec3 tintedConcealerColor = uConcealerColor.rgb * ambientTint;
             float concealerStrength = concealerAlpha * uConcealerColor.a;
             if (uConcealerStyle == 2 || uConcealerStyle == 3) {
                 float targetingMask = 1.0;
@@ -349,44 +356,49 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
                     float redness = origColor.r - (origColor.g + origColor.b * 0.5);
                     targetingMask = smoothstep(-0.05, 0.05, redness);
                 }
-                vec3 correctorTarget = blendSoftLight(blurred, uConcealerColor.rgb);
+                vec3 correctorTarget = blendSoftLight(blurred, tintedConcealerColor);
                 currentSkin = mix(currentSkin, correctorTarget + highFreq, concealerStrength * targetingMask);
             } else {
-                vec3 concealerLowFreq = mix(blurred, uConcealerColor.rgb, concealerStrength);
+                vec3 concealerLowFreq = mix(blurred, tintedConcealerColor, concealerStrength);
                 currentSkin = mix(currentSkin, concealerLowFreq + highFreq, concealerStrength);
             }
 
             // [3] CONTOUR (Hybrid Multiply + Linear Burn)
+            vec3 tintedContourColor = uContourColor.rgb * ambientTint;
             float contourAlphaFinal = contourAlpha * uContourColor.a;
-            vec3 mulResult = currentSkin * uContourColor.rgb;
-            vec3 burnResult = max(currentSkin + uContourColor.rgb - vec3(1.0), vec3(0.0));
+            vec3 mulResult = currentSkin * tintedContourColor;
+            vec3 burnResult = max(currentSkin + tintedContourColor - vec3(1.0), vec3(0.0));
             vec3 deepContour = mix(mulResult, burnResult, 0.4);
             float effectiveAlpha = pow(contourAlphaFinal, 0.85);
             currentSkin = mix(currentSkin, deepContour, effectiveAlpha);
 
             // [4] BLUSH (Hybrid Normal + Soft Light)
+            vec3 tintedBlushColor = uBlushColor.rgb * ambientTint;
             float blushStrength = blushAlpha * uBlushColor.a;
-            vec3 softBlush = blendSoftLight(currentSkin, uBlushColor.rgb);
-            vec3 normalBlush = uBlushColor.rgb;
+            vec3 softBlush = blendSoftLight(currentSkin, tintedBlushColor);
+            vec3 normalBlush = tintedBlushColor;
             vec3 pigmentedBlush = mix(softBlush, normalBlush, 0.65);
             float skinLum = dot(currentSkin, vec3(0.299, 0.587, 0.114));
             pigmentedBlush *= (skinLum * 0.4 + 0.8);
             currentSkin = mix(currentSkin, pigmentedBlush, blushStrength);
 
             // [5] HIGHLIGHTER (Screen)
-            vec3 highlightLayer = blendScreen(currentSkin, uHighlightColor.rgb);
+            vec3 tintedHighlightColor = uHighlightColor.rgb * ambientTint;
+            vec3 highlightLayer = blendScreen(currentSkin, tintedHighlightColor);
             currentSkin = mix(currentSkin, highlightLayer, highlightAlpha * uHighlightColor.a);
 
             // [7] EYESHADOW (Overlay / Normal hybrid). Region weight is re-baked every
             // frame from live landmarks (see Pass 1d), so blink compression/stretch
             // already happens via the mesh's own UV deformation — no blendshape
             // plumbing needed for this layer.
-            vec3 overlayEye = blendOverlay(currentSkin, uEyeshadowColor.rgb);
-            vec3 pigmentedEye = mix(overlayEye, uEyeshadowColor.rgb, 0.5);
+            vec3 tintedEyeshadowColor = uEyeshadowColor.rgb * ambientTint;
+            vec3 overlayEye = blendOverlay(currentSkin, tintedEyeshadowColor);
+            vec3 pigmentedEye = mix(overlayEye, tintedEyeshadowColor, 0.5);
             currentSkin = mix(currentSkin, pigmentedEye, eyeAlpha * uEyeshadowColor.a);
 
             // [10] LIPSTICK (Matte / Multiply)
-            vec3 lipMultiply = currentSkin * uLipstickColor.rgb;
+            vec3 tintedLipstickColor = uLipstickColor.rgb * ambientTint;
+            vec3 lipMultiply = currentSkin * tintedLipstickColor;
             currentSkin = mix(currentSkin, lipMultiply, lipAlpha * uLipstickColor.a);
 
             // Before/after split-screen comparison: uShowMakeup is a horizontal divider
