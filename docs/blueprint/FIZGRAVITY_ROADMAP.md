@@ -109,11 +109,23 @@ Sebelum memperluas compositing FBO lagi (Fase 5), selesaikan dulu misteri kenapa
 0 di seluruh layar saat fitur itu diaktifkan (root cause belum ditemukan, sekarang cuma dinonaktifkan).
 Tanpa ini, kepercayaan diri kita soal "aman menambah PASS baru ke compositing pipeline" masih rapuh.
 
-### 0.3 — Validasi multi-device
+### 0.3 — Ketahanan Lintas-Device (bukan "harus punya banyak HP")
 
-Minimal 2-3 device Android dengan chipset/kamera berbeda (bukan cuma device abang sekarang) sebelum
-mengklaim fondasi ini next-level — banyak asumsi (stream kamera 1920x1080, AWB behavior, EIS availability)
-divalidasi cuma dari SATU `dumpsys media.camera`.
+Constraint nyata: cuma ada satu device fisik untuk testing. Solusinya BUKAN beli banyak HP — dua jalan
+yang realistis:
+
+1. **Tulis kode defensif, jangan asumsikan kapabilitas device.** Bug konkret yang SUDAH ada sekarang:
+   kita minta `CONTROL_VIDEO_STABILIZATION_MODE_ON` tanpa cek dulu apakah `availableVideoStabilizationModes`
+   device itu beneran mendukungnya — kebetulan device testing kita punya, tapi di device lain yang tidak,
+   perilakunya tidak terjamin (silent-ignore atau berpotensi masalah). Perbaikannya: query kapabilitas
+   kamera saat runtime (`CameraCharacteristics`) dan hanya minta fitur yang benar-benar terdaftar tersedia,
+   dengan fallback yang jelas kalau tidak — bukan asumsi "device saya punya, berarti semua punya". Audit
+   semua tempat lain di kode yang mengasumsikan kapabilitas kamera tanpa cek runtime (resolusi, AE range,
+   dst) dengan pola yang sama.
+2. **Firebase Test Lab** (tier gratis terbatas — beberapa run/hari) untuk spot-check periodik di device
+   fisik REAL milik Google secara remote, tanpa perlu beli unit sendiri. Bukan pengganti testing utama,
+   cukup buat verifikasi sesekali sebelum rilis besar bahwa asumsi runtime di atas benar-benar bekerja
+   di chipset/kamera lain.
 
 ---
 
