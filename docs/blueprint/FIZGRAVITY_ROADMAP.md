@@ -91,7 +91,7 @@ Sebelum lanjut ke Fase 1+, tutup dulu gap konkret berikut (audit jujur per 2026-
 | EIS (stabilisasi) | 🟡 Aktif, efeknya belum diukur | Baru terverifikasi HAL menerapkannya — belum pernah diukur kuantitatif seberapa besar mengurangi shake |
 | Kalibrasi kamera per-device | 🔴 **Gap nyata** | Semua tuning baru divalidasi di SATU device. App kelas atas biasa punya fallback/tuning untuk populasi hardware kamera Android yang beragam |
 | Render-loop smoothness | 🟡 Stabil, di bawah standar kelas atas | ~16-20fps (ngikutin kecepatan deteksi). Kompetitor kelas atas biasa lebih mulus (30fps+) lewat reprojection — sengaja ditunda ke Fase 6, jadi ini gap yang SUDAH DIKETAHUI, belum ditutup |
-| Fondasi compositing FBO | 🟡 Stabil untuk pass yang ada, baru kegoyang saat diperluas | Percobaan perluasan terakhir (AO/hairline) nemu bug yang akar masalahnya belum ditemukan — pemahaman kita soal batas aman arsitektur ini masih ada lubang |
+| Fondasi compositing FBO | ✅ AO/hairline root-cause ketemu & fixed (2026-07-28) | Bug utamanya kontrak return-value FFI Rust (return 0=sukses padahal caller expect count), bukan arsitektur FBO-nya sendiri — lihat 0.2 di bawah |
 
 ### 0.1 — Checkpoint Retuning Visual (WAJIB sebelum Fase 1 dianggap "selesai")
 
@@ -103,11 +103,30 @@ ulang sekarang fondasinya sudah benar. Setelah Lighting Estimation (di bawah) ak
 estimation selesai, bukan dua kali terpisah. Cek ulang tiap layer: default opacity, blur radius,
 konstanta warna (litFoundation offset, dst) — pakai wajah asli di kondisi cahaya berbeda, bukan cuma satu skenario.
 
-### 0.2 — Root-cause bug AO/hairline yang belum terpecahkan
+### 0.2 — Root-cause bug AO/hairline (✅ SELESAI 2026-07-28)
 
-Sebelum memperluas compositing FBO lagi (Fase 5), selesaikan dulu misteri kenapa `hairlineBlend` terbaca
-0 di seluruh layar saat fitur itu diaktifkan (root cause belum ditemukan, sekarang cuma dinonaktifkan).
-Tanpa ini, kepercayaan diri kita soal "aman menambah PASS baru ke compositing pipeline" masih rapuh.
+Root cause ketemu, bukan satu bug tapi rantai tiga:
+
+1. **Kontrak return-value FFI Rust salah** — `fizgravity_engine_calculate_dynamic_ao` dan
+   `_calculate_hairline_blending` me-return `0` di jalur sukses (gaya C "0=OK"), padahal setiap fungsi FFI
+   lain di file yang sama (mis. `get_stabilized_landmarks`) me-return JUMLAH ELEMEN yang ditulis. Wrapper
+   JNI C++ menganggap return value itu count dan bail kalau `n<=0` — jadi kedua panggilan itu SELALU dianggap
+   gagal walau datanya sudah benar dan buffer sudah keisi. Efeknya PASS 1f (bake `auxMaskFbo`) nggak pernah
+   jalan, dan karena clear-ke-netral-nya ikut kebungkus di dalam pengecekan yang sama, `auxMaskFbo` tertinggal
+   di nilai nol — bikin `foundationMask *= hairlineBlend` jadi nol PERMANEN dan **semua layer makeup mati
+   total**, bukan cuma AO/hairline-nya. Fix: `Fizgravity-AR-Engine@fed6bfd` (return count, bukan 0) + pindah
+   clear netral `(1,1,0,0)` ke luar pengecekan data-availability.
+2. **Formula AO mulut kebalik** — mulut tertutup (`jawOpen=0`) malah dapat AO gelap (0.15), mulut kebuka cuma
+   sampai 0.85. Sudah dibalik: tertutup = netral (1.0), kebuka = gelap (0.15).
+3. **`auxMaskFbo` nggak pernah di-blur** — beda dengan `maskFbo` yang sudah lewat PASS 2 (blur 3px), jadi
+   hairline-fade nongol sebagai garis banding tegas di dahi (interpolasi vertex yang jarang), bukan gradien.
+   Fix: PASS 2b baru (`MatchAndBeauty@81dfe6e`) meniru PASS 2 persis, blur `auxMaskFbo` → `auxMaskBlurFbo`.
+
+Sudah diverifikasi di device fisik: makeup (blush/lipstik/dst) balik normal, AO dinamis di lipatan
+hidung/mata & fade hairline aktif dan smooth, AO mulut nggak nyangkut pas mingkem. Ditemukan juga (tidak
+di-scope ke sesi ini): area bibir 0% ke-cover foundation dengan tepi tegas — kemungkinan besar disengaja
+(foundation tidak boleh nutup bibir, itu tugas layer lipstik terpisah), belum diverifikasi ke kode-nya
+langsung, dicatat sebagai item terpisah untuk nanti.
 
 ### 0.3 — Ketahanan Lintas-Device (bukan "harus punya banyak HP")
 
