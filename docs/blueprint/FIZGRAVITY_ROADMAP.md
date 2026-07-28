@@ -252,13 +252,25 @@ Investasi dengan hasil berlipat, dan paling jarang dikerjakan dengan benar oleh 
    corruption" yang lama). 47/47 test Rust lulus (4 baru: exclude-region check, symmetric-normal math
    check — diverifikasi manual aljabar SH-nya, row-stride padding, out-of-bounds safety). Masih Rust-only,
    BELUM disambungkan ke app.
-2. ⏳ **BELUM** — Wiring JNI/Kotlin: entry point FFI (reuse `fizgravity_engine_update_frame` yang sudah
-   manggil fungsi di atas tapi belum pernah dipanggil dari Kotlin manapun), panggilan per-frame dari
-   `FizgravityARView.kt`, ambil balik CCT/intensity (atau full SH) ke sisi render.
-3. ⏳ **BELUM** — Konsumsi di compositing shader: adjust warna foundation/skin-tone ngikutin CCT & intensity
-   cahaya asli — ini baru payoff "unlock realisme" yang sebenarnya.
-4. ⏳ **BARU SETELAH 1-3 selesai**: retuning 0.1 (11 layer lama) + fitur-fitur baru (Fase 2+) jalan di atas
-   kanvas yang sudah benar — sekali kerja, bukan dua kali.
+2. ✅ **SELESAI (2026-07-29, `Fizgravity-AR-Engine@5690e69` + `MatchAndBeauty@3982e65`)** — Wiring
+   JNI/Kotlin: entry point FFI baru `fizgravity_engine_estimate_lighting` (dedicated, terpisah dari
+   `fizgravity_engine_update_frame` yang berat/penuh side-effect), bridge JNI `fizgravityEstimateLighting`
+   di `FizgravityJNI.cpp` (pakai `GetDirectBufferCapacity` asli, bukan tebakan `width*height`), dipanggil
+   throttled (tiap 5 frame) dari `FizgravityARView.kt` lewat downscale 128×128 khusus (bukan reuse
+   trackingBitmap 640px — algoritmanya cuma sample ~280 titik landmark, convert seluruh bitmap besar
+   percuma).
+3. ✅ **SELESAI (`MatchAndBeauty@3982e65`)** — Konsumsi di compositing shader: `nativeSetAmbientLighting`
+   (plain setter, aman dipanggil dari thread manapun — bukan texture upload kayak percobaan hair mask yang
+   gagal), uniform `uAmbientCCT`/`uAmbientIntensity`, `cctToTint()` nge-tint `litFoundation` warm/cool
+   relatif ke 6500K netral. Default (6500K, intensity 1.0) resolve ke no-op identity sampai data asli
+   masuk. **Diverifikasi di device**: nggak crash, semua uniform ter-resolve, log real-time nunjukin nilai
+   NYATA yang stabil & masuk akal (CCT≈4850K, intensity≈0.85 — bukan cuma default), bukan cuma "build
+   sukses".
+   
+   Dikerjakan 3 track paralel (2 subagent + mandor buat glue Kotlin yang butuh konteks pipeline kamera
+   penuh) — kontrak interface dikunci dulu sebelum paralel supaya nggak konflik integrasi.
+4. ⏳ **SEKARANG BISA MULAI**: retuning 0.1 (11 layer lama) + fitur-fitur baru (Fase 2+) jalan di atas
+   kanvas yang sudah benar — sekali kerja, bukan dua kali. **Fase 1 inti sudah tuntas.**
 
 ## FASE 2: Auto-Rekomendasi Berbasis Deteksi Wajah
 
