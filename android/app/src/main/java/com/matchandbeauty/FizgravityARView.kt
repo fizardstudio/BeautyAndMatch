@@ -2,6 +2,9 @@ package com.matchandbeauty
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Rect
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -16,10 +19,9 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.facebook.react.uimanager.ThemedReactContext
-import com.google.mediapipe.framework.image.MediaImageBuilder
+import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
-import com.google.mediapipe.tasks.vision.core.ImageProcessingOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import java.nio.ByteBuffer
@@ -88,6 +90,18 @@ class FizgravityARView @JvmOverloads constructor(
     private var bufferA: ByteBuffer? = null
     private var bufferB: ByteBuffer? = null
     private var useBufferA = true
+
+    // Downscaled tracking input for MediaPipe — the render/compositing pipeline
+    // needs the full-res camera image, but the face landmark model doesn't: feeding
+    // it the full 1920x1080 frame every call means MediaPipe pays a resize/preprocess
+    // cost proportional to that size before it ever gets to its own small internal
+    // input tensor. Track on a much smaller downscaled copy instead; render stays
+    // full-res and untouched. Bitmaps are allocated once and reused every frame to
+    // avoid per-frame GC pressure at 20-60fps.
+    private var trackingSourceBitmap: Bitmap? = null
+    private var trackingBitmap: Bitmap? = null
+    private var trackingCanvas: Canvas? = null
+    private val TRACKING_WIDTH = 640
     
     private val renderLock = Any()
     private var latestImageBuffer: ByteBuffer? = null
@@ -444,19 +458,73 @@ class FizgravityARView @JvmOverloads constructor(
             // of scene brightness and can underexpose to near-black in anything less than
             // strong direct light; this flexible range still lets AE drop fps for exposure
             // in dim conditions while permitting up to 30fps when there's enough light.
+            // This device has no OIS hardware (availableOpticalStabilization=[0] per
+            // Camera2 characteristics) but does support digital/electronic stabilization
+            // (availableVideoStabilizationModes includes ON). The stock camera app almost
+            // certainly has this on by default for its Preview; this app was never
+            // requesting it at all, leaving raw handheld shake fully visible — worse here
+            // than in the stock app because the tight selfie framing amplifies any shake.
             androidx.camera.camera2.interop.Camera2Interop.Extender(imageAnalysisBuilder)
                 .setCaptureRequestOption(
                     android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
                     android.util.Range(10, 30)
                 )
+                .setCaptureRequestOption(
+                    android.hardware.camera2.CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                    android.hardware.camera2.CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                )
+                // Verify the HAL actually honors the requested mode instead of silently
+                // ignoring an unsupported/rejected key (which would show no error at all).
+                .setSessionCaptureCallback(object : android.hardware.camera2.CameraCaptureSession.CaptureCallback() {
+                    private var lastLogNs = 0L
+                    override fun onCaptureCompleted(
+                        session: android.hardware.camera2.CameraCaptureSession,
+                        request: android.hardware.camera2.CaptureRequest,
+                        result: android.hardware.camera2.TotalCaptureResult
+                    ) {
+                        val now = System.nanoTime()
+                        if (now - lastLogNs >= 2_000_000_000L) {
+                            lastLogNs = now
+                            val applied = result.get(android.hardware.camera2.CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)
+                            Log.i("FizgravityPerf", "stabilizationMode requested=ON(1) appliedByHAL=$applied")
+                        }
+                    }
+                })
 
             val imageAnalysis = imageAnalysisBuilder.build()
 
             imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
                 val landmarker = faceLandmarker
                 if (landmarker != null && imageProxy.image != null) {
-                    val rot = imageProxy.imageInfo.rotationDegrees
-                    val mpImage = MediaImageBuilder(imageProxy.image!!).build()
+                    val plane0 = imageProxy.planes[0]
+                    val srcWidth = imageProxy.width
+                    val srcHeight = imageProxy.height
+                    val bufferWidth = plane0.rowStride / plane0.pixelStride
+
+                    if (trackingSourceBitmap == null || trackingSourceBitmap!!.width != bufferWidth || trackingSourceBitmap!!.height != srcHeight) {
+                        trackingSourceBitmap = Bitmap.createBitmap(bufferWidth, srcHeight, Bitmap.Config.ARGB_8888)
+                    }
+                    // duplicate() so this read doesn't disturb plane0.buffer's own
+                    // position/limit — the existing code further below reads the
+                    // SAME underlying Plane's buffer again via remaining() to size
+                    // the GL upload buffer, and that must see it untouched.
+                    val trackingSrcBuffer = plane0.buffer.duplicate()
+                    trackingSrcBuffer.rewind()
+                    trackingSourceBitmap!!.copyPixelsFromBuffer(trackingSrcBuffer)
+
+                    if (trackingBitmap == null) {
+                        val trackingHeight = (srcHeight.toFloat() * TRACKING_WIDTH / srcWidth).toInt()
+                        trackingBitmap = Bitmap.createBitmap(TRACKING_WIDTH, trackingHeight, Bitmap.Config.ARGB_8888)
+                        trackingCanvas = Canvas(trackingBitmap!!)
+                    }
+                    trackingCanvas!!.drawBitmap(
+                        trackingSourceBitmap!!,
+                        Rect(0, 0, srcWidth, srcHeight),
+                        Rect(0, 0, trackingBitmap!!.width, trackingBitmap!!.height),
+                        null
+                    )
+
+                    val mpImage = BitmapImageBuilder(trackingBitmap!!).build()
                     val timestampMs = imageProxy.imageInfo.timestamp / 1_000_000L
                     
                     try {
@@ -468,7 +536,7 @@ class FizgravityARView @JvmOverloads constructor(
                         if (mpMs > perfMpMsMax) perfMpMsMax = mpMs
                         val nowNs2 = System.nanoTime()
                         if (nowNs2 - perfMpWindowStartNs >= 2_000_000_000L) {
-                            Log.i("FizgravityPerf", "mediapipe avgMs=%.2f maxMs=%.2f res=${imageProxy.width}x${imageProxy.height} samples=$perfMpCount".format(perfMpMsSum / perfMpCount, perfMpMsMax))
+                            Log.i("FizgravityPerf", "mediapipe avgMs=%.2f maxMs=%.2f captureRes=${imageProxy.width}x${imageProxy.height} trackRes=${trackingBitmap?.width}x${trackingBitmap?.height} samples=$perfMpCount".format(perfMpMsSum / perfMpCount, perfMpMsMax))
                             perfMpMsSum = 0.0
                             perfMpMsMax = 0.0
                             perfMpCount = 0

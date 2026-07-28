@@ -61,7 +61,7 @@ export interface MakeupState {
 const initialMakeup = {
   foundationColor: '#00000000',
   foundationOpacity: 0.0,
-  foundationBlur: 8.0,
+  foundationBlur: 0.0,
   foundationType: 'matte' as const,
 
   concealerColor: '#00000000',

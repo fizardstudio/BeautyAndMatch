@@ -97,7 +97,7 @@ class FizgravityARViewManager : SimpleViewManager<FizgravityARView>() {
         FizgravityRenderer.nativeSetMakeupStyle(2, style)
     }
 
-    @com.facebook.react.uimanager.annotations.ReactProp(name = "makeupFoundationBlur", defaultFloat = 8.0f)
+    @com.facebook.react.uimanager.annotations.ReactProp(name = "makeupFoundationBlur", defaultFloat = 0.0f)
     fun setMakeupFoundationBlur(view: FizgravityARView, radius: Float) {
         FizgravityRenderer.nativeSetFoundationBlur(radius)
     }
