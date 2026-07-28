@@ -312,6 +312,15 @@ menambah variasi gaya Blush/Highlighter/Eyeshadow yang sifatnya "nice to have", 
 - **Lipstick**: preservasi kerutan bibir (`lipDetailRatio`), aturan overline (haram overline sudut mulut),
   ombré Korean vs Western — dictionary §10.
 - **Foundation**: CIELAB/ITA color matching (§1D) + kompensasi ashiness kulit gelap (§1C).
+- **Kualitas batas bibir** (2026-07-29): malam ini fixed bug besar (lipstick bocor jauh ke kulit
+  kumis/dagu — root cause: bake mask pakai triangulasi wajah PENUH, bukan triangulasi khusus bibir yang
+  sudah ada tapi belum kepakai di `Fizgravity-AR-Engine/src/makeup_triangulator.rs`). Sudah di-port ke
+  C++ (`get_upper_lip_triangles`/`get_lower_lip_triangles`, 11 titik kontur luar+dalam per sisi bibir) —
+  bocor udah nggak ada, tapi tepinya masih kelihatan patah-patah/segi (cuma 11 titik, garis lurus antar
+  titik, bukan kurva halus). User minta riset TAMO biar robust ke macam-macam bentuk bibir, bukan cuma
+  dituning di 1 wajah — **riset sedang jalan** (cek MediaPipe refine_landmarks equivalent, teknik smooth-
+  curve macam Catmull-Rom/Bezier di titik kontur yang ada, atau pendekatan segmentasi kayak hair
+  segmenter). Hasil riset & rekomendasi belum masuk sesi ini — lanjutkan sebelum retuning lipstick.
 
 ## FASE 5: Softlens + Perluas Katalog Layer Lain
 
