@@ -123,10 +123,18 @@ Root cause ketemu, bukan satu bug tapi rantai tiga:
    Fix: PASS 2b baru (`MatchAndBeauty@81dfe6e`) meniru PASS 2 persis, blur `auxMaskFbo` → `auxMaskBlurFbo`.
 
 Sudah diverifikasi di device fisik: makeup (blush/lipstik/dst) balik normal, AO dinamis di lipatan
-hidung/mata & fade hairline aktif dan smooth, AO mulut nggak nyangkut pas mingkem. Ditemukan juga (tidak
-di-scope ke sesi ini): area bibir 0% ke-cover foundation dengan tepi tegas — kemungkinan besar disengaja
-(foundation tidak boleh nutup bibir, itu tugas layer lipstik terpisah), belum diverifikasi ke kode-nya
-langsung, dicatat sebagai item terpisah untuk nanti.
+hidung/mata & fade hairline aktif dan smooth, AO mulut nggak nyangkut pas mingkem. Ditemukan juga: area
+bibir 0% ke-cover foundation dengan tepi tegas.
+
+**✅ SELESAI (2026-07-29, `MatchAndBeauty@4cf3d20`)** — diriset & di-fix. Kode ASLI ternyata TIDAK punya
+exclusion eksplisit buat bibir luar (cuma `INNER_LIPS_INDICES`, lubang rongga mulut, yang dipotong; radial
+fade mask.r sendiri floor di 0.4, nggak pernah nol) — tapi riset MUA + matematika blend lipstik kita
+(multiply, mode blend paling nggak "maafin" warna non-netral di bawahnya) sama-sama nunjuk ke satu
+rekomendasi: bibir HARUS dikecualikan dari foundation. Teknik MUA asli nunjukin priming bibir (kalau ada)
+pakai corrector netral yang restrained, BUKAN warna foundation pilihan user yang bisa sembarang. Fix:
+`foundationMask` dipisah jadi lebih sempit dari `faceMask` (gate umum buat layer lain), pakai
+`lipMaskFbo` yang udah ada (`foundationMask = faceMask * (1 - lipRawMask)`) — reuse infrastruktur,
+falloff halus, nggak perlu geometri baru. Diverifikasi device: bibir bersih dari cyan test, tepi halus.
 
 **Addendum (2026-07-29) — fitur "dynamic AO" dihapus setelah riset TAMO.** Setelah bug di atas selesai
 dan efeknya akhirnya kelihatan (sebelumnya nggak pernah nyala sama sekali), user menyadari efeknya
@@ -192,14 +200,17 @@ orientasi output mask konsisten dengan `sCameraTex`/landmark sejak awal desain.
 Constraint nyata: cuma ada satu device fisik untuk testing. Solusinya BUKAN beli banyak HP — dua jalan
 yang realistis:
 
-1. **Tulis kode defensif, jangan asumsikan kapabilitas device.** Bug konkret yang SUDAH ada sekarang:
-   kita minta `CONTROL_VIDEO_STABILIZATION_MODE_ON` tanpa cek dulu apakah `availableVideoStabilizationModes`
-   device itu beneran mendukungnya — kebetulan device testing kita punya, tapi di device lain yang tidak,
-   perilakunya tidak terjamin (silent-ignore atau berpotensi masalah). Perbaikannya: query kapabilitas
-   kamera saat runtime (`CameraCharacteristics`) dan hanya minta fitur yang benar-benar terdaftar tersedia,
-   dengan fallback yang jelas kalau tidak — bukan asumsi "device saya punya, berarti semua punya". Audit
-   semua tempat lain di kode yang mengasumsikan kapabilitas kamera tanpa cek runtime (resolusi, AE range,
-   dst) dengan pola yang sama.
+1. **Tulis kode defensif, jangan asumsikan kapabilitas device.** ✅ Fixed & audited lengkap (2026-07-29).
+   Bug awal: kita minta `CONTROL_VIDEO_STABILIZATION_MODE_ON` tanpa cek dulu apakah
+   `availableVideoStabilizationModes` device itu beneran mendukungnya — kebetulan device testing kita
+   punya, tapi di device lain yang tidak, perilakunya tidak terjamin. Fixed: query kapabilitas kamera saat
+   runtime (`CameraCharacteristics`), minta fitur cuma kalau terdaftar tersedia, fallback jelas kalau
+   tidak (sama buat `CONTROL_AE_TARGET_FPS_RANGE`). **Audit lanjutan** (semua tempat lain yang mungkin
+   asumsi kapabilitas tanpa cek) sudah dikerjakan — hasilnya bersih: `ResolutionStrategy`/`AspectRatioStrategy`
+   CameraX sudah resolve terhadap `StreamConfigurationMap` device secara internal (nggak perlu dicek
+   manual), `OUTPUT_IMAGE_FORMAT_RGBA_8888` itu konversi software CameraX sendiri (bukan capability
+   hardware), pembacaan AWB/gains cuma diagnostic logging read-only, dan absennya kamera depan udah
+   ke-handle try/catch di `bindToLifecycle`. Nggak ada temuan baru yang butuh fix.
 2. **Firebase Test Lab** (tier gratis terbatas — beberapa run/hari) untuk spot-check periodik di device
    fisik REAL milik Google secara remote, tanpa perlu beli unit sendiri. Bukan pengganti testing utama,
    cukup buat verifikasi sesekali sebelum rilis besar bahwa asumsi runtime di atas benar-benar bekerja
