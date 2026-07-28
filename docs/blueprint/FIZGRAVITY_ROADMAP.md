@@ -128,6 +128,29 @@ di-scope ke sesi ini): area bibir 0% ke-cover foundation dengan tepi tegas — k
 (foundation tidak boleh nutup bibir, itu tugas layer lipstik terpisah), belum diverifikasi ke kode-nya
 langsung, dicatat sebagai item terpisah untuk nanti.
 
+**Addendum (2026-07-29) — fitur "dynamic AO" dihapus setelah riset TAMO.** Setelah bug di atas selesai
+dan efeknya akhirnya kelihatan (sebelumnya nggak pernah nyala sama sekali), user menyadari efeknya
+sendiri terasa nggak perlu — bukan bug, tapi pertanyaan desain: apa AO ini memang seharusnya ada?
+Riset ke YouCam/Perfect Corp, ModiFace, Banuba, Snap Lens Studio: **tidak ada satupun app kelas atas
+yang punya layer ambient-occlusion berdiri sendiri, always-on, di luar kontrol user.** Shading semacam
+ini selalu jadi sub-behavior Contour (persis spec holy-grail kita — hairline shading = teknik Contour,
+bukan layer sendiri) atau didorong oleh lighting estimation real-time. Darkening always-on di nasolabial
+fold & sudut mata malah anti-pattern dikenal (bikin wajah kelihatan capek/tua). **Keputusan: dihapus**
+(`MatchAndBeauty@df4550d`) — `auxMaskFbo`, bake/blur pass, dan shader sampling-nya dicabut semua. Fungsi
+FFI Rust-nya (`fizgravity_engine_calculate_dynamic_ao`/`_hairline_blending`) TIDAK dihapus, sengaja
+dibiarkan lengkap + didokumentasikan buat dipakai ulang kalau nanti Contour beneran butuh teknik
+hairline-nya (sesuai spec) atau Fase 1 (Lighting Estimation) butuh AO yang adaptif ke cahaya asli.
+
+**Temuan sampingan → fixed juga**: user (dahi lebar) melihat cakupan foundation berhenti jauh di bawah
+garis rambut asli. Root cause: bounding box mask cuma dihitung dari 478 landmark MediaPipe, dan landmark
+teratasnya (10) memang nggak pernah sampai ke garis rambut (MediaPipe tidak melacak rambut sama sekali)
+— jadi orang berdahi lebar/tinggi selalu nyisa area polos lebih banyak. Riset antropometri (Farkas-style):
+rasio glabella(168)-ke-subnasale(2) ≈ 0.84× jarak brow-ke-hairline yang sebenarnya — dipakai buat
+extrapolate bounding box ke arah dahi. **Ini heuristik fallback, BUKAN deteksi hairline asli** — app
+kelas atas (Banuba dkk.) pakai deteksi warna piksel di atas dahi atau model segmentasi wajah
+(BiSeNet/CelebAMask-HQ, kelas "skin" vs "hair" terpisah) buat akurasi per-orang. Segmentasi rambut asli
+dicatat sebagai follow-up terpisah (butuh model ML tambahan), bukan dikerjakan sesi ini.
+
 ### 0.3 — Ketahanan Lintas-Device (bukan "harus punya banyak HP")
 
 Constraint nyata: cuma ada satu device fisik untuk testing. Solusinya BUKAN beli banyak HP — dua jalan
