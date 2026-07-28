@@ -214,11 +214,33 @@ blush, contour, dan semua yang ditambah nanti) langsung terlihat jauh lebih meya
 respons ke suhu warna cahaya asli itu yang bedain "AR makeup meyakinkan" vs "kayak stiker nempel".
 Investasi dengan hasil berlipat, dan paling jarang dikerjakan dengan benar oleh kompetitor.
 
-- `fizgravity_engine_get_ambient_cct_and_intensity` & `estimate_ambient_sh` — sudah ada algoritmanya
-  (McCamy CCT estimation lengkap + test), tapi `estimate_ambient_sh` **sengaja dikosongkan** karena
-  riwayat bug stack corruption. Riset TAMO dulu (bagaimana ARKit/ARCore/Spark AR melakukan real-time
-  ambient lighting estimation dari kamera tanpa depth sensor) → identifikasi apa yang menyebabkan stack
-  corruption sebelumnya → implementasi ulang hati-hati, bukan asal aktifkan lagi.
+- `fizgravity_engine_get_ambient_cct_and_intensity` — CCT/intensity dari koefisien SH (formula McCamy)
+  sudah lengkap dan valid, tetap dipakai. `estimate_ambient_sh` (yang isi koefisien SH-nya) sengaja
+  dikosongkan sejak commit `a8fc0ea` karena "stack corruption", dan **belum pernah tersambung ke app
+  sama sekali** — cuma dipanggil dari `fizgravity_engine_update_frame` di Rust, yang sendirinya nggak
+  pernah dipanggil dari Kotlin/C++ manapun di MatchAndBeauty. Jadi murni kode mati, belum pernah diuji
+  dengan data kamera asli.
+
+  **Riset TAMO (2026-07-29) — hasilnya tegas: JANGAN tambal, GANTI algoritmanya.** Implementasi lama
+  proyeksikan SH langsung dari piksel mentah foto selfie, seolah-olah foto itu environment map (bola
+  cermin/foto 360°). Ini **category error** — selfie itu foto WAJAH (permukaan diffuse yang KENA
+  cahaya), bukan foto sumber cahayanya. Riset (ECCV 2018, CGF 2018, dan terutama Google **"Portrait
+  Light" SIGGRAPH Asia 2020** — real-time di smartphone, order SH sama persis: 9 koefisien × RGB) nunjukin
+  teknik yang benar buat front-facing camera adalah **"face as light probe"**: pakai geometri wajah yang
+  SUDAH kita punya (normal permukaan dari 468 landmark FaceLandmarker) + asumsi kulit reflektor diffuse
+  seragam, solve inverse problem (shading yang keliatan di wajah → kombinasi cahaya SH yang paling
+  cocok), BUKAN proyeksi piksel mentah ke arah ray kamera. Kontrak output (9 koefisien × RGB) tetap sama,
+  jadi konsumen di render pipeline nggak perlu didesain ulang — cuma cara HITUNGnya yang ganti total.
+  Bug "stack corruption" di implementasi lama juga kemungkinan besar root cause-nya sudah ketahuan
+  (pembacaan piksel `pixels.add(pixel_offset)` di `estimate_ambient_sh` versi lama mengasumsikan buffer
+  RGB rapat tanpa row-stride padding — pola bug yang sama persis dengan yang sudah kita hindari di sisi
+  Kotlin `FizgravityARView.kt` untuk `trackingBitmap`) — tapi jadi moot karena algoritmanya diganti,
+  bukan didaur ulang.
+
+  Sumber riset: arXiv 2301.06143 (Multi-Camera Lighting Estimation for Front-Facing Mobile AR — konfirmasi
+  front-facing-only itu genuinely sulit, solusi mereka nambah kamera belakang; kita nggak perlu seambisius
+  itu karena cuma butuh lighting buat makeup relighting, bukan rekonstruksi lingkungan penuh), Google
+  Portrait Light (arxiv.org/pdf/2008.02396), Calian et al. "From Faces to Outdoor Light Probes" (CGF 2018).
 
 ## FASE 2: Auto-Rekomendasi Berbasis Deteksi Wajah
 
