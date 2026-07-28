@@ -78,6 +78,45 @@ lebih tinggi dari menambah satu layer atau satu gaya baru manapun.
 
 ---
 
+## FASE 0: Naikkan Fondasi ke Standar Next-Level (BUKAN Cuma "Sudah Jalan")
+
+Fondasi kamera/render sesi 2026-07-28 sudah **solid dan terbukti** — tapi "solid" ≠ "next-level".
+Sebelum lanjut ke Fase 1+, tutup dulu gap konkret berikut (audit jujur per 2026-07-28):
+
+| Item | Status | Gap ke next-level |
+|---|---|---|
+| Resolusi kamera | ✅ Solid, terverifikasi data | — |
+| Tracking MediaPipe real-time | ✅ Solid, terverifikasi data | — |
+| AWB / color science | 🟡 Jalan (default OS) | Belum ada color pipeline yang di-engineer sendiri (profile per-device), cuma pakai auto-AWB apa adanya |
+| EIS (stabilisasi) | 🟡 Aktif, efeknya belum diukur | Baru terverifikasi HAL menerapkannya — belum pernah diukur kuantitatif seberapa besar mengurangi shake |
+| Kalibrasi kamera per-device | 🔴 **Gap nyata** | Semua tuning baru divalidasi di SATU device. App kelas atas biasa punya fallback/tuning untuk populasi hardware kamera Android yang beragam |
+| Render-loop smoothness | 🟡 Stabil, di bawah standar kelas atas | ~16-20fps (ngikutin kecepatan deteksi). Kompetitor kelas atas biasa lebih mulus (30fps+) lewat reprojection — sengaja ditunda ke Fase 6, jadi ini gap yang SUDAH DIKETAHUI, belum ditutup |
+| Fondasi compositing FBO | 🟡 Stabil untuk pass yang ada, baru kegoyang saat diperluas | Percobaan perluasan terakhir (AO/hairline) nemu bug yang akar masalahnya belum ditemukan — pemahaman kita soal batas aman arsitektur ini masih ada lubang |
+
+### 0.1 — Checkpoint Retuning Visual (WAJIB sebelum Fase 1 dianggap "selesai")
+
+11 layer makeup yang sudah ada di-tuning secara visual (opacity default, blur radius, konstanta warna)
+**di atas pipeline yang saat itu belum stabil dan resolusinya salah** (sebelum sesi perbaikan kamera/render
+2026-07-28). Rumus shader-nya sendiri tetap valid, tapi angka tuning-nya kemungkinan besar butuh dikalibrasi
+ulang sekarang fondasinya sudah benar. Setelah Lighting Estimation (di bawah) aktif, "kanvas" berubah lagi
+(warna kena koreksi cahaya) — jadi retuning ini paling masuk akal dilakukan SEKALI, SETELAH lighting
+estimation selesai, bukan dua kali terpisah. Cek ulang tiap layer: default opacity, blur radius,
+konstanta warna (litFoundation offset, dst) — pakai wajah asli di kondisi cahaya berbeda, bukan cuma satu skenario.
+
+### 0.2 — Root-cause bug AO/hairline yang belum terpecahkan
+
+Sebelum memperluas compositing FBO lagi (Fase 5), selesaikan dulu misteri kenapa `hairlineBlend` terbaca
+0 di seluruh layar saat fitur itu diaktifkan (root cause belum ditemukan, sekarang cuma dinonaktifkan).
+Tanpa ini, kepercayaan diri kita soal "aman menambah PASS baru ke compositing pipeline" masih rapuh.
+
+### 0.3 — Validasi multi-device
+
+Minimal 2-3 device Android dengan chipset/kamera berbeda (bukan cuma device abang sekarang) sebelum
+mengklaim fondasi ini next-level — banyak asumsi (stream kamera 1920x1080, AWB behavior, EIS availability)
+divalidasi cuma dari SATU `dumpsys media.camera`.
+
+---
+
 ## FASE 1: Lighting Estimation — Unlock Realisme Terbesar
 
 **Kenapa duluan:** ini bukan nambah satu layer baru, tapi bikin SEMUA layer yang sudah ada (foundation,
