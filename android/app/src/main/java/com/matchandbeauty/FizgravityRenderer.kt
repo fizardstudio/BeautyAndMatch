@@ -13,6 +13,8 @@ object FizgravityRenderer {
         height: Int, 
         rowStride: Int, 
         landmarks: FloatArray?,
+        dynamicAO: FloatArray?,
+        hairlineBlend: FloatArray?,
         hasNewImage: Boolean
     )
     @JvmStatic external fun nativeSetMakeup(regionType: Int, r: Float, g: Float, b: Float, a: Float)

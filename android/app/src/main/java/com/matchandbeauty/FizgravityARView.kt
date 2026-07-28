@@ -63,6 +63,12 @@ class FizgravityARView @JvmOverloads constructor(
     private external fun fizgravityGetStabilizedLandmarks(
         enginePtr: Long
     ): FloatArray?
+    private external fun fizgravityCalculateDynamicAO(
+        enginePtr: Long
+    ): FloatArray?
+    private external fun fizgravityCalculateHairlineBlending(
+        enginePtr: Long
+    ): FloatArray?
     private external fun fizgravityPushImu(
         enginePtr: Long, gx: Float, gy: Float, gz: Float, ax: Float, ay: Float, az: Float, timestampSec: Float
     ): Int
@@ -109,6 +115,8 @@ class FizgravityARView @JvmOverloads constructor(
     private var latestImageHeight = 0
     private var latestImageRowStride = 0
     private var latestLandmarks: FloatArray? = null
+    private var latestDynamicAO: FloatArray? = null
+    private var latestHairlineBlend: FloatArray? = null
     private var newLandmarksAvailable = false
 
     private var lastRenderedBuffer: ByteBuffer? = null
@@ -116,6 +124,8 @@ class FizgravityARView @JvmOverloads constructor(
     private var lastRenderedHeight = 0
     private var lastRenderedRowStride = 0
     private var lastRenderedLandmarks: FloatArray? = null
+    private var lastRenderedDynamicAO: FloatArray? = null
+    private var lastRenderedHairlineBlend: FloatArray? = null
     private var lastMediaPipeUpdateNs = 0L
     private var lastDrawNs = 0L
 
@@ -220,6 +230,8 @@ class FizgravityARView @JvmOverloads constructor(
         var rHeight = 0
         var rStride = 0
         var rLandmarks: FloatArray? = null
+        var rDynamicAO: FloatArray? = null
+        var rHairlineBlend: FloatArray? = null
 
         // Check for new camera frame
         synchronized(renderLock) {
@@ -229,6 +241,8 @@ class FizgravityARView @JvmOverloads constructor(
                 rHeight = latestImageHeight
                 rStride = latestImageRowStride
                 rLandmarks = latestLandmarks
+                rDynamicAO = latestDynamicAO
+                rHairlineBlend = latestHairlineBlend
                 newLandmarksAvailable = false
                 latestImageBuffer = null
 
@@ -238,6 +252,8 @@ class FizgravityARView @JvmOverloads constructor(
                 lastRenderedHeight = rHeight
                 lastRenderedRowStride = rStride
                 lastRenderedLandmarks = rLandmarks
+                lastRenderedDynamicAO = rDynamicAO
+                lastRenderedHairlineBlend = rHairlineBlend
                 lastMediaPipeUpdateNs = System.nanoTime()
             }
         }
@@ -246,7 +262,7 @@ class FizgravityARView @JvmOverloads constructor(
         if (renderBuffer != null) {
             val drawStartNs = System.nanoTime()
             FizgravityRenderer.nativeDrawSyncFrame(
-                cameraTextureId, renderBuffer!!, rWidth, rHeight, rStride, rLandmarks, hasNewImage = true
+                cameraTextureId, renderBuffer!!, rWidth, rHeight, rStride, rLandmarks, rDynamicAO, rHairlineBlend, hasNewImage = true
             )
             val drawMs = (System.nanoTime() - drawStartNs) / 1_000_000.0
 
@@ -271,7 +287,7 @@ class FizgravityARView @JvmOverloads constructor(
             // interpolation tick is visually identical to the last real tick.
             val drawStartNs = System.nanoTime()
             FizgravityRenderer.nativeDrawSyncFrame(
-                cameraTextureId, lastRenderedBuffer!!, lastRenderedWidth, lastRenderedHeight, lastRenderedRowStride, lastRenderedLandmarks, hasNewImage = false
+                cameraTextureId, lastRenderedBuffer!!, lastRenderedWidth, lastRenderedHeight, lastRenderedRowStride, lastRenderedLandmarks, lastRenderedDynamicAO, lastRenderedHairlineBlend, hasNewImage = false
             )
             val drawMs = (System.nanoTime() - drawStartNs) / 1_000_000.0
 
@@ -487,6 +503,13 @@ class FizgravityARView @JvmOverloads constructor(
                             lastLogNs = now
                             val applied = result.get(android.hardware.camera2.CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)
                             Log.i("FizgravityPerf", "stabilizationMode requested=ON(1) appliedByHAL=$applied")
+
+                            val awbMode = result.get(android.hardware.camera2.CaptureResult.CONTROL_AWB_MODE)
+                            val awbState = result.get(android.hardware.camera2.CaptureResult.CONTROL_AWB_STATE)
+                            val awbLock = result.get(android.hardware.camera2.CaptureResult.CONTROL_AWB_LOCK)
+                            val gains = result.get(android.hardware.camera2.CaptureResult.COLOR_CORRECTION_GAINS)
+                            val gainsStr = if (gains != null) "r=%.2f gFromR=%.2f gFromB=%.2f b=%.2f".format(gains.red, gains.greenEven, gains.greenOdd, gains.blue) else "null"
+                            Log.i("FizgravityPerf", "awbMode=$awbMode awbState=$awbState awbLock=$awbLock gains=[$gainsStr]")
                         }
                     }
                 })
@@ -544,6 +567,8 @@ class FizgravityARView @JvmOverloads constructor(
                         }
 
                         var rawLandmarks: FloatArray? = null
+                        var dynamicAOResult: FloatArray? = null
+                        var hairlineBlendResult: FloatArray? = null
                         if (result.faceLandmarks().isNotEmpty()) {
                             val fl = result.faceLandmarks()[0]
                             val count = fl.size
@@ -585,6 +610,12 @@ class FizgravityARView @JvmOverloads constructor(
                                     }
                                     if (stabilized != null && stabilized.size == fa.size) {
                                         finalLandmarks = stabilized
+                                    }
+                                    dynamicAOResult = synchronized(engineLock) {
+                                        fizgravityCalculateDynamicAO(enginePtr)
+                                    }
+                                    hairlineBlendResult = synchronized(engineLock) {
+                                        fizgravityCalculateHairlineBlending(enginePtr)
                                     }
                                 } catch (e: Exception) {
                                     Log.w("FizgravityARView", "Engine call failed, using MediaPipe direct: ${e.message}")
@@ -659,6 +690,8 @@ class FizgravityARView @JvmOverloads constructor(
                             latestImageHeight = imageProxy.height
                             latestImageRowStride = plane.rowStride
                             latestLandmarks = rawLandmarks
+                            latestDynamicAO = dynamicAOResult
+                            latestHairlineBlend = hairlineBlendResult
                             newLandmarksAvailable = true
                         }
                         useBufferA = !useBufferA

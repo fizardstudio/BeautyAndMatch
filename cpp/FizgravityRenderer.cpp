@@ -165,6 +165,7 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
     varying vec2 vFaceUV;
     uniform sampler2D sCameraTex;
     uniform sampler2D sMaskTex;
+    uniform sampler2D sAuxMaskTex;
     uniform vec2 uTexelSize;
     uniform float uFoundationBlurRadius;
 
@@ -232,8 +233,11 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
     void main() {
         vec4 origColor = texture2D(sCameraTex, vTexCoord);
         vec4 mask = texture2D(sMaskTex, vTexCoord);
-        
-        float foundationMask = mask.r;
+        vec4 auxMask = texture2D(sAuxMaskTex, vTexCoord);
+        float dynamicAO = auxMask.r;
+        float hairlineBlend = auxMask.g;
+
+        float foundationMask = mask.r; // DIAGNOSTIC: hairlineBlend multiply temporarily disabled
         float contourAlpha   = mask.g * foundationMask;
         float blushAlpha     = mask.b * foundationMask;
         float highlightAlpha = mask.a * foundationMask;
@@ -357,6 +361,7 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             vec3 lipMultiply = currentSkin * uLipstickColor.rgb;
             currentSkin = mix(currentSkin, lipMultiply, lipAlpha * uLipstickColor.a);
 
+            // currentSkin *= dynamicAO; // DIAGNOSTIC: temporarily disabled
             gl_FragColor = vec4(currentSkin, origColor.a);
         } else {
             gl_FragColor = origColor;
@@ -483,6 +488,7 @@ struct RendererContext {
     GLint fndEyeMaskTexHandle;
     GLint fndConcealerColorHandle;
     GLint fndConcealerMaskTexHandle;
+    GLint fndAuxMaskTexHandle;
     GLint fndConcealerStyleHandle;
     GLint fndContourStyleHandle;
     GLint fndBlushStyleHandle;
@@ -514,6 +520,7 @@ struct RendererContext {
     FBO lipMaskFbo;
     FBO eyeMaskFbo;
     FBO concealerMaskFbo;
+    FBO auxMaskFbo; // R=dynamicAO, G=hairlineBlend
 
     float foundationColor[4] = {0.0f, 1.0f, 1.0f, 0.0f};
     float contourColor[4] = {0.3f, 0.15f, 0.1f, 0.0f};
@@ -592,6 +599,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     gCtx.fndEyeMaskTexHandle = glGetUniformLocation(gCtx.foundationProgram, "sEyeMaskTex");
     gCtx.fndConcealerColorHandle = glGetUniformLocation(gCtx.foundationProgram, "uConcealerColor");
     gCtx.fndConcealerMaskTexHandle = glGetUniformLocation(gCtx.foundationProgram, "sConcealerMaskTex");
+    gCtx.fndAuxMaskTexHandle = glGetUniformLocation(gCtx.foundationProgram, "sAuxMaskTex");
     gCtx.fndConcealerStyleHandle = glGetUniformLocation(gCtx.foundationProgram, "uConcealerStyle");
     gCtx.fndScaleHandle = glGetUniformLocation(gCtx.foundationProgram, "uScale");
     gCtx.fndOffsetHandle = glGetUniformLocation(gCtx.foundationProgram, "uOffset");
@@ -643,6 +651,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeResize(JNIEnv* env, jclass claz
     gCtx.lipMaskFbo.setup(width, height, false);
     gCtx.eyeMaskFbo.setup(width, height, false);
     gCtx.concealerMaskFbo.setup(width, height, false);
+    gCtx.auxMaskFbo.setup(width, height, false);
 
     float screenAspect = (float)height / (float)width;
     float cameraAspect = 16.0f / 9.0f; // Typical portrait
@@ -658,7 +667,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeResize(JNIEnv* env, jclass claz
 
 JNIEXPORT void JNICALL
 Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
-    JNIEnv* env, jclass clazz, jint textureId, jobject buffer, jint width, jint height, jint rowStride, jfloatArray landmarks, jboolean hasNewImage)
+    JNIEnv* env, jclass clazz, jint textureId, jobject buffer, jint width, jint height, jint rowStride, jfloatArray landmarks, jfloatArray dynamicAO, jfloatArray hairlineBlend, jboolean hasNewImage)
 {
     void* pixels = env->GetDirectBufferAddress(buffer);
     if (!pixels) return;
@@ -1068,6 +1077,56 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
             glDisableVertexAttribArray(gCtx.mkPositionHandle);
             glDisableVertexAttribArray(gCtx.mkAlphaHandle);
 
+            // ============================================================
+            // PASS 1f: BAKE AUXILIARY MASK (Dynamic AO + Hairline Blending)
+            // from the Rust engine's per-vertex calculations. R channel =
+            // dynamic AO (1.0 = bright, darker = more occluded), G channel
+            // = hairline blend (1.0 = full makeup, fades to 0 at hairline).
+            // Two separate draw calls into the same FBO via glColorMask so
+            // each writes only its own channel without clobbering the
+            // other. Default-clear to (1,1,0,0) first so any screen area
+            // not covered by the face mesh stays neutral (no darkening,
+            // no fade) rather than defaulting to black/zero.
+            // ============================================================
+            if (dynamicAO != nullptr && hairlineBlend != nullptr) {
+                jsize aoLen = env->GetArrayLength(dynamicAO);
+                jsize hairlineLen = env->GetArrayLength(hairlineBlend);
+                if (aoLen >= 468 && hairlineLen >= 468) {
+                    jboolean isCopyAO = JNI_FALSE, isCopyHair = JNI_FALSE;
+                    float* aoData = env->GetFloatArrayElements(dynamicAO, &isCopyAO);
+                    float* hairlineData = env->GetFloatArrayElements(hairlineBlend, &isCopyHair);
+
+                    glBindFramebuffer(GL_FRAMEBUFFER, gCtx.auxMaskFbo.fbo);
+                    glViewport(0, 0, gCtx.width, gCtx.height);
+                    glClearColor(1.0f, 1.0f, 0.0f, 0.0f);
+                    glClear(GL_COLOR_BUFFER_BIT);
+
+                    glUseProgram(gCtx.makeupWeightProgram);
+                    glUniform2f(gCtx.mkScaleHandle, gCtx.scaleX, gCtx.scaleY);
+                    glUniform2f(gCtx.mkOffsetHandle, gCtx.offsetX, gCtx.offsetY);
+                    glVertexAttribPointer(gCtx.mkPositionHandle, 3, GL_FLOAT, GL_FALSE, 0, data);
+                    glEnableVertexAttribArray(gCtx.mkPositionHandle);
+                    glEnableVertexAttribArray(gCtx.mkAlphaHandle);
+
+                    // Dynamic AO → R channel only
+                    glColorMask(GL_TRUE, GL_FALSE, GL_FALSE, GL_FALSE);
+                    glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, aoData);
+                    glDrawElements(GL_TRIANGLES, numIndices, GL_UNSIGNED_SHORT, MESH_INDICES);
+
+                    // Hairline blend → G channel only
+                    glColorMask(GL_FALSE, GL_TRUE, GL_FALSE, GL_FALSE);
+                    glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, hairlineData);
+                    glDrawElements(GL_TRIANGLES, numIndices, GL_UNSIGNED_SHORT, MESH_INDICES);
+
+                    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                    glDisableVertexAttribArray(gCtx.mkPositionHandle);
+                    glDisableVertexAttribArray(gCtx.mkAlphaHandle);
+
+                    env->ReleaseFloatArrayElements(dynamicAO, aoData, JNI_ABORT);
+                    env->ReleaseFloatArrayElements(hairlineBlend, hairlineData, JNI_ABORT);
+                }
+            }
+
             // Release JNI array
             env->ReleaseFloatArrayElements(landmarks, data, JNI_ABORT);
         }
@@ -1140,6 +1199,11 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, gCtx.concealerMaskFbo.texture);
     glUniform1i(gCtx.fndConcealerMaskTexHandle, 4);
+
+    // Bind Auxiliary Mask FBO (dynamic AO + hairline blend) to Texture Unit 5
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_2D, gCtx.auxMaskFbo.texture);
+    glUniform1i(gCtx.fndAuxMaskTexHandle, 5);
 
     glUniform2f(gCtx.fndScaleHandle, gCtx.scaleX, gCtx.scaleY);
     glUniform2f(gCtx.fndOffsetHandle, gCtx.offsetX, gCtx.offsetY);

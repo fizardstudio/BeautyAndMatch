@@ -26,6 +26,8 @@ typedef int     (*FnFizPushImu)(void*, float, float, float, float, float, float,
 typedef int     (*FnFizSetFaceMesh)(void*, const float*, const float*);
 typedef int     (*FnFizGetPredictedLandmarks)(void*, float*, int, float);
 typedef int     (*FnFizGetStabilizedLandmarks)(void*, float*, int);
+typedef int     (*FnFizCalculateDynamicAO)(void*, float*, int);
+typedef int     (*FnFizCalculateHairlineBlending)(void*, float*, int);
 
 // Handle ke library Fizgravity yang dimuat secara lazy
 static void* gFizLibHandle = nullptr;
@@ -35,6 +37,8 @@ static FnFizPushImu           gFizPushImu            = nullptr;
 static FnFizSetFaceMesh       gFizSetFaceMesh        = nullptr;
 static FnFizGetPredictedLandmarks gFizGetPredicted   = nullptr;
 static FnFizGetStabilizedLandmarks gFizGetStabilized = nullptr;
+static FnFizCalculateDynamicAO gFizCalculateDynamicAO = nullptr;
+static FnFizCalculateHairlineBlending gFizCalculateHairlineBlending = nullptr;
 static bool                   gFizLoaded             = false;
 
 // ── Lazy-load libfizgravity_ar.so saat pertama kali dibutuhkan ─────────────────
@@ -66,8 +70,10 @@ static bool ensureFizgravityLoaded() {
     gFizSetFaceMesh= (FnFizSetFaceMesh)       dlsym(gFizLibHandle, "fizgravity_engine_set_face_mesh");
     gFizGetPredicted=(FnFizGetPredictedLandmarks)dlsym(gFizLibHandle, "fizgravity_engine_get_predicted_landmarks");
     gFizGetStabilized=(FnFizGetStabilizedLandmarks)dlsym(gFizLibHandle, "fizgravity_engine_get_stabilized_landmarks");
+    gFizCalculateDynamicAO=(FnFizCalculateDynamicAO)dlsym(gFizLibHandle, "fizgravity_engine_calculate_dynamic_ao");
+    gFizCalculateHairlineBlending=(FnFizCalculateHairlineBlending)dlsym(gFizLibHandle, "fizgravity_engine_calculate_hairline_blending");
 
-    if (!gFizInit || !gFizRelease || !gFizPushImu || !gFizSetFaceMesh || !gFizGetPredicted || !gFizGetStabilized) {
+    if (!gFizInit || !gFizRelease || !gFizPushImu || !gFizSetFaceMesh || !gFizGetPredicted || !gFizGetStabilized || !gFizCalculateDynamicAO || !gFizCalculateHairlineBlending) {
         LOGE("dlsym failed — missing symbols in libfizgravity_ar.so: %s", dlerror());
         dlclose(gFizLibHandle);
         gFizLibHandle = nullptr;
@@ -205,6 +211,50 @@ Java_com_matchandbeauty_FizgravityARView_fizgravityGetStabilizedLandmarks(
     jfloatArray result = env->NewFloatArray(n * 3);
     if (result == nullptr) return nullptr; // OOM
     env->SetFloatArrayRegion(result, 0, n * 3, out_buf);
+    return result;
+}
+
+// fizgravityCalculateDynamicAO(enginePtr) → FloatArray? (468 floats atau null)
+// 1.0 = terang penuh (tidak ada occlusion), makin kecil = makin gelap.
+JNIEXPORT jfloatArray JNICALL
+Java_com_matchandbeauty_FizgravityARView_fizgravityCalculateDynamicAO(
+    JNIEnv* env, jobject thiz,
+    jlong enginePtr)
+{
+    if (!gFizLoaded || gFizCalculateDynamicAO == nullptr) return nullptr;
+    void* ptr = (void*)(uintptr_t)enginePtr;
+    if (ptr == nullptr) return nullptr;
+
+    static thread_local float out_buf[468];
+    int n = gFizCalculateDynamicAO(ptr, out_buf, 468);
+
+    if (n <= 0) return nullptr;
+
+    jfloatArray result = env->NewFloatArray(n);
+    if (result == nullptr) return nullptr; // OOM
+    env->SetFloatArrayRegion(result, 0, n, out_buf);
+    return result;
+}
+
+// fizgravityCalculateHairlineBlending(enginePtr) → FloatArray? (468 floats atau null)
+// 1.0 = makeup tampil penuh, memudar ke 0.0 dekat garis rambut.
+JNIEXPORT jfloatArray JNICALL
+Java_com_matchandbeauty_FizgravityARView_fizgravityCalculateHairlineBlending(
+    JNIEnv* env, jobject thiz,
+    jlong enginePtr)
+{
+    if (!gFizLoaded || gFizCalculateHairlineBlending == nullptr) return nullptr;
+    void* ptr = (void*)(uintptr_t)enginePtr;
+    if (ptr == nullptr) return nullptr;
+
+    static thread_local float out_buf[468];
+    int n = gFizCalculateHairlineBlending(ptr, out_buf, 468);
+
+    if (n <= 0) return nullptr;
+
+    jfloatArray result = env->NewFloatArray(n);
+    if (result == nullptr) return nullptr; // OOM
+    env->SetFloatArrayRegion(result, 0, n, out_buf);
     return result;
 }
 
