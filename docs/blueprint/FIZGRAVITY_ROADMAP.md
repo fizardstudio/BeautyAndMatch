@@ -242,6 +242,24 @@ Investasi dengan hasil berlipat, dan paling jarang dikerjakan dengan benar oleh 
   itu karena cuma butuh lighting buat makeup relighting, bukan rekonstruksi lingkungan penuh), Google
   Portrait Light (arxiv.org/pdf/2008.02396), Calian et al. "From Faces to Outdoor Light Probes" (CGF 2018).
 
+**Alur implementasi (biar nggak kerja dua kali — tiap step checkpoint jelas sebelum lanjut):**
+
+1. ✅ **SELESAI (2026-07-29, `Fizgravity-AR-Engine@22c6da7`)** — Algoritma Rust `estimate_ambient_sh`
+   ditulis ulang total pakai face-as-light-probe: exclude landmark mata/alis/bibir
+   (`is_valid_skin_sample`, index dicross-check dari `FizgravityMakeupIndices.h`), proyeksi SH pakai
+   normal geometris asli (`face::compute_face_normals`) + warna piksel di titik landmark itu, row-stride
+   eksplisit + validasi `buffer_len_bytes` NYATA sebelum unsafe read (langsung menyasar kelas bug "stack
+   corruption" yang lama). 47/47 test Rust lulus (4 baru: exclude-region check, symmetric-normal math
+   check — diverifikasi manual aljabar SH-nya, row-stride padding, out-of-bounds safety). Masih Rust-only,
+   BELUM disambungkan ke app.
+2. ⏳ **BELUM** — Wiring JNI/Kotlin: entry point FFI (reuse `fizgravity_engine_update_frame` yang sudah
+   manggil fungsi di atas tapi belum pernah dipanggil dari Kotlin manapun), panggilan per-frame dari
+   `FizgravityARView.kt`, ambil balik CCT/intensity (atau full SH) ke sisi render.
+3. ⏳ **BELUM** — Konsumsi di compositing shader: adjust warna foundation/skin-tone ngikutin CCT & intensity
+   cahaya asli — ini baru payoff "unlock realisme" yang sebenarnya.
+4. ⏳ **BARU SETELAH 1-3 selesai**: retuning 0.1 (11 layer lama) + fitur-fitur baru (Fase 2+) jalan di atas
+   kanvas yang sudah benar — sekali kerja, bukan dua kali.
+
 ## FASE 2: Auto-Rekomendasi Berbasis Deteksi Wajah
 
 Murah (datanya sudah ada dari morphology scan), dampaknya langsung ke persepsi "app ini pintar."
