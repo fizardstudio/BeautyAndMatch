@@ -63,6 +63,16 @@ class FizgravityARView @JvmOverloads constructor(
     private external fun fizgravityGetStabilizedLandmarks(
         enginePtr: Long
     ): FloatArray?
+    // NOTE (2026-07-28): fizgravityCalculateDynamicAO/HairlineBlending are correct and
+    // working (Rust FFI return-value contract fixed in Fizgravity-AR-Engine@fed6bfd),
+    // but intentionally NOT called anywhere right now. Research showed no top-tier AR
+    // beauty app treats facial ambient occlusion as a standalone always-on effect
+    // outside user control — it's always a sub-behavior of Contour (this app's own
+    // holy-grail spec agrees: hairline shading is a Contour technique, not its own
+    // layer) or driven by real-time lighting estimation. The always-on nasolabial/eye
+    // -corner darkening this fed was an anti-pattern (reads as a tired/aged face) and
+    // has been removed from the render pipeline. Kept here, unused, for reuse when
+    // Contour's face-shape hairline technique or Fase 1 (Lighting Estimation) is built.
     private external fun fizgravityCalculateDynamicAO(
         enginePtr: Long
     ): FloatArray?
@@ -115,8 +125,6 @@ class FizgravityARView @JvmOverloads constructor(
     private var latestImageHeight = 0
     private var latestImageRowStride = 0
     private var latestLandmarks: FloatArray? = null
-    private var latestDynamicAO: FloatArray? = null
-    private var latestHairlineBlend: FloatArray? = null
     private var newLandmarksAvailable = false
 
     private var lastRenderedBuffer: ByteBuffer? = null
@@ -124,8 +132,6 @@ class FizgravityARView @JvmOverloads constructor(
     private var lastRenderedHeight = 0
     private var lastRenderedRowStride = 0
     private var lastRenderedLandmarks: FloatArray? = null
-    private var lastRenderedDynamicAO: FloatArray? = null
-    private var lastRenderedHairlineBlend: FloatArray? = null
     private var lastMediaPipeUpdateNs = 0L
     private var lastDrawNs = 0L
 
@@ -230,8 +236,6 @@ class FizgravityARView @JvmOverloads constructor(
         var rHeight = 0
         var rStride = 0
         var rLandmarks: FloatArray? = null
-        var rDynamicAO: FloatArray? = null
-        var rHairlineBlend: FloatArray? = null
 
         // Check for new camera frame
         synchronized(renderLock) {
@@ -241,8 +245,6 @@ class FizgravityARView @JvmOverloads constructor(
                 rHeight = latestImageHeight
                 rStride = latestImageRowStride
                 rLandmarks = latestLandmarks
-                rDynamicAO = latestDynamicAO
-                rHairlineBlend = latestHairlineBlend
                 newLandmarksAvailable = false
                 latestImageBuffer = null
 
@@ -252,8 +254,6 @@ class FizgravityARView @JvmOverloads constructor(
                 lastRenderedHeight = rHeight
                 lastRenderedRowStride = rStride
                 lastRenderedLandmarks = rLandmarks
-                lastRenderedDynamicAO = rDynamicAO
-                lastRenderedHairlineBlend = rHairlineBlend
                 lastMediaPipeUpdateNs = System.nanoTime()
             }
         }
@@ -262,7 +262,7 @@ class FizgravityARView @JvmOverloads constructor(
         if (renderBuffer != null) {
             val drawStartNs = System.nanoTime()
             FizgravityRenderer.nativeDrawSyncFrame(
-                cameraTextureId, renderBuffer!!, rWidth, rHeight, rStride, rLandmarks, rDynamicAO, rHairlineBlend, hasNewImage = true
+                cameraTextureId, renderBuffer!!, rWidth, rHeight, rStride, rLandmarks, hasNewImage = true
             )
             val drawMs = (System.nanoTime() - drawStartNs) / 1_000_000.0
 
@@ -287,7 +287,7 @@ class FizgravityARView @JvmOverloads constructor(
             // interpolation tick is visually identical to the last real tick.
             val drawStartNs = System.nanoTime()
             FizgravityRenderer.nativeDrawSyncFrame(
-                cameraTextureId, lastRenderedBuffer!!, lastRenderedWidth, lastRenderedHeight, lastRenderedRowStride, lastRenderedLandmarks, lastRenderedDynamicAO, lastRenderedHairlineBlend, hasNewImage = false
+                cameraTextureId, lastRenderedBuffer!!, lastRenderedWidth, lastRenderedHeight, lastRenderedRowStride, lastRenderedLandmarks, hasNewImage = false
             )
             val drawMs = (System.nanoTime() - drawStartNs) / 1_000_000.0
 
@@ -620,8 +620,6 @@ class FizgravityARView @JvmOverloads constructor(
                         }
 
                         var rawLandmarks: FloatArray? = null
-                        var dynamicAOResult: FloatArray? = null
-                        var hairlineBlendResult: FloatArray? = null
                         if (result.faceLandmarks().isNotEmpty()) {
                             val fl = result.faceLandmarks()[0]
                             val count = fl.size
@@ -663,12 +661,6 @@ class FizgravityARView @JvmOverloads constructor(
                                     }
                                     if (stabilized != null && stabilized.size == fa.size) {
                                         finalLandmarks = stabilized
-                                    }
-                                    dynamicAOResult = synchronized(engineLock) {
-                                        fizgravityCalculateDynamicAO(enginePtr)
-                                    }
-                                    hairlineBlendResult = synchronized(engineLock) {
-                                        fizgravityCalculateHairlineBlending(enginePtr)
                                     }
                                 } catch (e: Exception) {
                                     Log.w("FizgravityARView", "Engine call failed, using MediaPipe direct: ${e.message}")
@@ -743,8 +735,6 @@ class FizgravityARView @JvmOverloads constructor(
                             latestImageHeight = imageProxy.height
                             latestImageRowStride = plane.rowStride
                             latestLandmarks = rawLandmarks
-                            latestDynamicAO = dynamicAOResult
-                            latestHairlineBlend = hairlineBlendResult
                             newLandmarksAvailable = true
                         }
                         useBufferA = !useBufferA

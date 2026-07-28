@@ -159,13 +159,26 @@ static const char* FOUNDATION_VERTEX_SHADER = R"(
     }
 )";
 
+// NOTE (2026-07-28): this shader used to also sample a "sAuxMaskTex" (dynamic
+// ambient occlusion + hairline blend, baked from Fizgravity-AR-Engine's
+// fizgravity_engine_calculate_dynamic_ao/_hairline_blending) that multiplied
+// into foundationMask and currentSkin unconditionally, regardless of any
+// user makeup selection. Removed after research showed no top-tier AR beauty
+// app treats facial AO as a standalone always-on effect outside user control
+// — it's always a sub-behavior of Contour (matches this app's own holy-grail
+// spec: hairline shading is a Contour technique, not its own layer) or driven
+// by real-time lighting estimation, and unconditional nasolabial/eye-corner
+// darkening reads as a tired/aged-face anti-pattern. The Rust FFI functions
+// are still correct and present (unused) for reuse when Contour's face-shape
+// hairline technique or Fase 1 (Lighting Estimation) gets built — see
+// FIZGRAVITY_ROADMAP.md 0.2 and FizgravityARView.kt's fizgravityCalculateAO/
+// HairlineBlending declarations.
 static const char* COMPOSITING_FRAGMENT_SHADER = R"(
     precision mediump float;
     varying vec2 vTexCoord;
     varying vec2 vFaceUV;
     uniform sampler2D sCameraTex;
     uniform sampler2D sMaskTex;
-    uniform sampler2D sAuxMaskTex;
     uniform vec2 uTexelSize;
     uniform float uFoundationBlurRadius;
 
@@ -233,11 +246,8 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
     void main() {
         vec4 origColor = texture2D(sCameraTex, vTexCoord);
         vec4 mask = texture2D(sMaskTex, vTexCoord);
-        vec4 auxMask = texture2D(sAuxMaskTex, vTexCoord);
-        float dynamicAO = auxMask.r;
-        float hairlineBlend = auxMask.g;
 
-        float foundationMask = mask.r * hairlineBlend;
+        float foundationMask = mask.r;
         float contourAlpha   = mask.g * foundationMask;
         float blushAlpha     = mask.b * foundationMask;
         float highlightAlpha = mask.a * foundationMask;
@@ -361,7 +371,6 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             vec3 lipMultiply = currentSkin * uLipstickColor.rgb;
             currentSkin = mix(currentSkin, lipMultiply, lipAlpha * uLipstickColor.a);
 
-            currentSkin *= dynamicAO;
             gl_FragColor = vec4(currentSkin, origColor.a);
         } else {
             gl_FragColor = origColor;
@@ -488,7 +497,6 @@ struct RendererContext {
     GLint fndEyeMaskTexHandle;
     GLint fndConcealerColorHandle;
     GLint fndConcealerMaskTexHandle;
-    GLint fndAuxMaskTexHandle;
     GLint fndConcealerStyleHandle;
     GLint fndContourStyleHandle;
     GLint fndBlushStyleHandle;
@@ -520,9 +528,6 @@ struct RendererContext {
     FBO lipMaskFbo;
     FBO eyeMaskFbo;
     FBO concealerMaskFbo;
-    FBO auxMaskFbo; // R=dynamicAO, G=hairlineBlend
-    FBO auxMaskBlurFbo; // Blurred copy of auxMaskFbo — smooths per-vertex interpolation
-                         // banding from the sparse forehead/nose landmark density.
 
     float foundationColor[4] = {0.0f, 1.0f, 1.0f, 0.0f};
     float contourColor[4] = {0.3f, 0.15f, 0.1f, 0.0f};
@@ -601,7 +606,6 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     gCtx.fndEyeMaskTexHandle = glGetUniformLocation(gCtx.foundationProgram, "sEyeMaskTex");
     gCtx.fndConcealerColorHandle = glGetUniformLocation(gCtx.foundationProgram, "uConcealerColor");
     gCtx.fndConcealerMaskTexHandle = glGetUniformLocation(gCtx.foundationProgram, "sConcealerMaskTex");
-    gCtx.fndAuxMaskTexHandle = glGetUniformLocation(gCtx.foundationProgram, "sAuxMaskTex");
     gCtx.fndConcealerStyleHandle = glGetUniformLocation(gCtx.foundationProgram, "uConcealerStyle");
     gCtx.fndScaleHandle = glGetUniformLocation(gCtx.foundationProgram, "uScale");
     gCtx.fndOffsetHandle = glGetUniformLocation(gCtx.foundationProgram, "uOffset");
@@ -624,7 +628,6 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     if (gCtx.fndEyeshadowColorHandle == -1) LOGE("Foundation shader: uniform 'uEyeshadowColor' not found");
     if (gCtx.fndEyeMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sEyeMaskTex' not found");
     if (gCtx.fndConcealerColorHandle == -1) LOGE("Foundation shader: uniform 'uConcealerColor' not found");
-    if (gCtx.fndAuxMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sAuxMaskTex' not found"); else LOGI("Foundation shader: sAuxMaskTex resolved to location %d", gCtx.fndAuxMaskTexHandle);
     if (gCtx.fndConcealerMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sConcealerMaskTex' not found");
     if (gCtx.fndConcealerStyleHandle == -1) LOGE("Foundation shader: uniform 'uConcealerStyle' not found");
     if (gCtx.fndScaleHandle == -1) LOGE("Foundation shader: uniform 'uScale' not found");
@@ -654,8 +657,6 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeResize(JNIEnv* env, jclass claz
     gCtx.lipMaskFbo.setup(width, height, false);
     gCtx.eyeMaskFbo.setup(width, height, false);
     gCtx.concealerMaskFbo.setup(width, height, false);
-    gCtx.auxMaskFbo.setup(width, height, false);
-    gCtx.auxMaskBlurFbo.setup(width, height, false);
 
     float screenAspect = (float)height / (float)width;
     float cameraAspect = 16.0f / 9.0f; // Typical portrait
@@ -671,7 +672,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeResize(JNIEnv* env, jclass claz
 
 JNIEXPORT void JNICALL
 Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
-    JNIEnv* env, jclass clazz, jint textureId, jobject buffer, jint width, jint height, jint rowStride, jfloatArray landmarks, jfloatArray dynamicAO, jfloatArray hairlineBlend, jboolean hasNewImage)
+    JNIEnv* env, jclass clazz, jint textureId, jobject buffer, jint width, jint height, jint rowStride, jfloatArray landmarks, jboolean hasNewImage)
 {
     void* pixels = env->GetDirectBufferAddress(buffer);
     if (!pixels) return;
@@ -762,6 +763,46 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
                 if (y < minY) minY = y;
                 if (y > maxY) maxY = y;
             }
+
+            // 1b. Extend the bounding box toward the estimated hairline. MediaPipe's
+            // landmark topology has no hairline point — its sparsest region is the
+            // forehead, and its highest standard landmark (10) sits well below the
+            // real hairline for most people (worse for taller/wider foreheads), so
+            // foundation coverage was capping out short of the hairline. Research
+            // (anthropometric studies, trichion/glabella/subnasale measurements)
+            // found no literature backing for extrapolating from landmark 10 itself
+            // (too unreliable/sparse a region), but a well-documented ratio DOES
+            // exist between brow (glabella) and nose-base (subnasale) — the upper
+            // face third runs ~0.83-0.85x the length of the middle third — and both
+            // reference points sit in MediaPipe's dense, reliably-tracked region.
+            // Landmark 168 = glabella/sellion (verified against MediaPipe's own
+            // canonical 3D face model spec — see
+            // docs/research/mediapipe_nose_contour_landmarks_guide.md), landmark 2 =
+            // subnasale/infranasale base. Direction is taken from landmark 10 (upper
+            // forehead) minus landmark 152 (chin) — anatomically unambiguous
+            // "toward-forehead" regardless of this array's coordinate convention
+            // (remapped/rotated upstream in FizgravityARView.kt).
+            {
+                float glabellaX = data[168 * 3 + 0], glabellaY = data[168 * 3 + 1];
+                float subnasaleX = data[2 * 3 + 0], subnasaleY = data[2 * 3 + 1];
+                float browToNoseDx = glabellaX - subnasaleX;
+                float browToNoseDy = glabellaY - subnasaleY;
+                float browToNoseDist = sqrtf(browToNoseDx * browToNoseDx + browToNoseDy * browToNoseDy);
+
+                float fhX = data[10 * 3 + 0] - data[152 * 3 + 0];
+                float fhY = data[10 * 3 + 1] - data[152 * 3 + 1];
+                float fhLen = sqrtf(fhX * fhX + fhY * fhY);
+                if (fhLen > 0.0001f) { fhX /= fhLen; fhY /= fhLen; }
+
+                float hairlineX = glabellaX + fhX * browToNoseDist * 0.84f;
+                float hairlineY = glabellaY + fhY * browToNoseDist * 0.84f;
+
+                if (hairlineX < minX) minX = hairlineX;
+                if (hairlineX > maxX) maxX = hairlineX;
+                if (hairlineY < minY) minY = hairlineY;
+                if (hairlineY > maxY) maxY = hairlineY;
+            }
+
             float faceCenterX = (minX + maxX) / 2.0f;
             float faceCenterY = (minY + maxY) / 2.0f;
             float faceRadiusX = (maxX - minX) / 2.0f;
@@ -1081,60 +1122,6 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
             glDisableVertexAttribArray(gCtx.mkPositionHandle);
             glDisableVertexAttribArray(gCtx.mkAlphaHandle);
 
-            // ============================================================
-            // PASS 1f: BAKE AUXILIARY MASK (Dynamic AO + Hairline Blending)
-            // from the Rust engine's per-vertex calculations. R channel =
-            // dynamic AO (1.0 = bright, darker = more occluded), G channel
-            // = hairline blend (1.0 = full makeup, fades to 0 at hairline).
-            // Two separate draw calls into the same FBO via glColorMask so
-            // each writes only its own channel without clobbering the
-            // other. Default-clear to (1,1,0,0) UNCONDITIONALLY every frame
-            // first, so the whole texture stays neutral (no darkening, no
-            // hairline fade) whenever the Rust engine data is unavailable —
-            // this must run even when dynamicAO/hairlineBlend are null,
-            // otherwise auxMaskFbo is left at its post-setup() zero-fill and
-            // every makeup layer gets silently gated to zero via
-            // foundationMask *= hairlineBlend in the compositing shader.
-            // ============================================================
-            glBindFramebuffer(GL_FRAMEBUFFER, gCtx.auxMaskFbo.fbo);
-            glViewport(0, 0, gCtx.width, gCtx.height);
-            glClearColor(1.0f, 1.0f, 0.0f, 0.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-
-            if (dynamicAO != nullptr && hairlineBlend != nullptr) {
-                jsize aoLen = env->GetArrayLength(dynamicAO);
-                jsize hairlineLen = env->GetArrayLength(hairlineBlend);
-                if (aoLen >= 468 && hairlineLen >= 468) {
-                    jboolean isCopyAO = JNI_FALSE, isCopyHair = JNI_FALSE;
-                    float* aoData = env->GetFloatArrayElements(dynamicAO, &isCopyAO);
-                    float* hairlineData = env->GetFloatArrayElements(hairlineBlend, &isCopyHair);
-
-                    glUseProgram(gCtx.makeupWeightProgram);
-                    glUniform2f(gCtx.mkScaleHandle, gCtx.scaleX, gCtx.scaleY);
-                    glUniform2f(gCtx.mkOffsetHandle, gCtx.offsetX, gCtx.offsetY);
-                    glVertexAttribPointer(gCtx.mkPositionHandle, 3, GL_FLOAT, GL_FALSE, 0, data);
-                    glEnableVertexAttribArray(gCtx.mkPositionHandle);
-                    glEnableVertexAttribArray(gCtx.mkAlphaHandle);
-
-                    // Dynamic AO → R channel only
-                    glColorMask(GL_TRUE, GL_FALSE, GL_FALSE, GL_FALSE);
-                    glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, aoData);
-                    glDrawElements(GL_TRIANGLES, numIndices, GL_UNSIGNED_SHORT, MESH_INDICES);
-
-                    // Hairline blend → G channel only
-                    glColorMask(GL_FALSE, GL_TRUE, GL_FALSE, GL_FALSE);
-                    glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, hairlineData);
-                    glDrawElements(GL_TRIANGLES, numIndices, GL_UNSIGNED_SHORT, MESH_INDICES);
-
-                    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                    glDisableVertexAttribArray(gCtx.mkPositionHandle);
-                    glDisableVertexAttribArray(gCtx.mkAlphaHandle);
-
-                    env->ReleaseFloatArrayElements(dynamicAO, aoData, JNI_ABORT);
-                    env->ReleaseFloatArrayElements(hairlineBlend, hairlineData, JNI_ABORT);
-                }
-            }
-
             // Release JNI array
             env->ReleaseFloatArrayElements(landmarks, data, JNI_ABORT);
         }
@@ -1176,33 +1163,6 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
     glDisableVertexAttribArray(gCtx.blurPositionHandle);
     glDisableVertexAttribArray(gCtx.blurTexCoordHandle);
 
-    // --- PASS 2b: Blur The Auxiliary Mask (Dynamic AO + Hairline Blend) ---
-    // auxMaskFbo is baked per-vertex from only 468 sparse landmarks (same as
-    // maskFbo), but unlike maskFbo it was never run through a smoothing pass —
-    // so the hairline fade showed up as a visible banding line across the
-    // forehead instead of a gradient, wherever two adjacent mesh vertices had
-    // a large alpha delta. Same blur program/radius as PASS 2 for consistency.
-    glBindFramebuffer(GL_FRAMEBUFFER, gCtx.auxMaskBlurFbo.fbo);
-    glViewport(0, 0, gCtx.width, gCtx.height);
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    glUseProgram(gCtx.blurProgram);
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, gCtx.auxMaskFbo.texture);
-    glUniform1i(gCtx.blurSamplerHandle, 0);
-    glUniform2f(gCtx.blurTexelSizeHandle, 3.0f / gCtx.width, 3.0f / gCtx.height);
-
-    glVertexAttribPointer(gCtx.blurPositionHandle, 2, GL_FLOAT, GL_FALSE, 0, QUAD_VERTICES);
-    glEnableVertexAttribArray(gCtx.blurPositionHandle);
-    glVertexAttribPointer(gCtx.blurTexCoordHandle, 2, GL_FLOAT, GL_FALSE, 0, FBO_TEX_COORDS);
-    glEnableVertexAttribArray(gCtx.blurTexCoordHandle);
-
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-    glDisableVertexAttribArray(gCtx.blurPositionHandle);
-    glDisableVertexAttribArray(gCtx.blurTexCoordHandle);
-
     // --- PASS 3: Apply Foundation & Render to Screen ---
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, gCtx.width, gCtx.height);
@@ -1234,11 +1194,6 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, gCtx.concealerMaskFbo.texture);
     glUniform1i(gCtx.fndConcealerMaskTexHandle, 4);
-
-    // Bind blurred Auxiliary Mask FBO (dynamic AO + hairline blend) to Texture Unit 5
-    glActiveTexture(GL_TEXTURE5);
-    glBindTexture(GL_TEXTURE_2D, gCtx.auxMaskBlurFbo.texture);
-    glUniform1i(gCtx.fndAuxMaskTexHandle, 5);
 
     glUniform2f(gCtx.fndScaleHandle, gCtx.scaleX, gCtx.scaleY);
     glUniform2f(gCtx.fndOffsetHandle, gCtx.offsetX, gCtx.offsetY);
