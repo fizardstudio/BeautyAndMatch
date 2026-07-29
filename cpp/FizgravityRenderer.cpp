@@ -506,9 +506,33 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
                 float cupidHighlight = pow(clamp(1.0 - dot(dCupid, dCupid), 0.0, 1.0), 3.0) * (1.0 - lipLowerWeight);
                 currentSkin += vec3(cupidHighlight * 0.35 * uLipstickGlossiness * lipAlpha);
             } else if (uLipstickFinish == 4) { // Shimmer: sparse bright sparkle points, not one coherent highlight
-                float sparkleNoise = fract(sin(dot(vTexCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
-                float sparkle = step(0.9, sparkleNoise);
-                currentSkin += vec3(sparkle * 0.5 * uLipstickGlossiness * lipAlpha);
+                // Was driven by vTexCoord (full CAMERA-FRAME screen space) — since the
+                // lip only covers a small slice of that range, the noise pattern barely
+                // varied across the whole lip, so it rendered as either nothing or one
+                // flat patch depending on face/camera position (confirmed on-device:
+                // "shimmer kayanya sama aja dengan matte", no visible sparkle at all).
+                // Using lipU/lipMask instead — both span a full, predictable 0..1 range
+                // across the ENTIRE lip regardless of screen resolution, face distance,
+                // or camera zoom — and flooring into a grid of cells (not raw per-pixel
+                // noise) guarantees a consistent, clearly visible number of sparkle
+                // points every time, moving correctly with the lips since it's derived
+                // from lip-local UVs, not screen position.
+                // sin()-based hashes (fract(sin(dot(...))*large)) are a known trap on
+                // mobile `mediump` precision: once the dot product's magnitude climbs
+                // into the hundreds/thousands (easily reached here — cell coordinates up
+                // to ~40 times coefficients like 78.233), mediump sin() on GPUs like
+                // Adreno loses range-reduction accuracy and can degrade toward a
+                // near-constant output — which is almost certainly why NO sparkle was
+                // visible at all (confirmed on-device, still true after switching to
+                // lip-local cell coordinates). Replaced with a multiply/fract-only hash
+                // (no trig call at all), which stays precision-safe in mediump regardless
+                // of input magnitude.
+                vec2 sparkleCell = floor(vec2(lipU * 40.0, lipMask * 20.0));
+                vec2 sparkleHashV = fract(sparkleCell * vec2(0.1031, 0.1030));
+                sparkleHashV += dot(sparkleHashV, sparkleHashV.yx + 33.33);
+                float sparkleNoise = fract((sparkleHashV.x + sparkleHashV.y) * sparkleHashV.x);
+                float sparkle = step(0.85, sparkleNoise);
+                currentSkin += vec3(sparkle * 0.6 * uLipstickGlossiness * lipAlpha);
             }
 
             // Before/after split-screen comparison: uShowMakeup is a horizontal divider
