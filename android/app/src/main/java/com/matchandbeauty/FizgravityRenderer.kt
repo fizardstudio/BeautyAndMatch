@@ -18,6 +18,7 @@ object FizgravityRenderer {
     @JvmStatic external fun nativeSetMakeup(regionType: Int, r: Float, g: Float, b: Float, a: Float)
     @JvmStatic external fun nativeSetMakeupStyle(regionType: Int, style: Int)
     @JvmStatic external fun nativeSetFoundationBlur(radius: Float)
+    @JvmStatic external fun nativeSetLipstickGlossiness(value: Float)
     @JvmStatic external fun nativeSetConcealerStyle(style: Int)
     @JvmStatic external fun nativeSetAmbientLighting(cctKelvin: Float, intensity: Float)
     @JvmStatic external fun nativeSetShowMakeup(value: Float)

@@ -130,7 +130,7 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
   const {
     foundationColor, foundationOpacity, foundationBlur, foundationType,
     concealerColor, concealerOpacity, concealerStyle,
-    lipstickColor, lipstickOpacity, blushColor, blushOpacity, blushStyle,
+    lipstickColor, lipstickOpacity, lipstickFinish, lipstickGlossiness, blushColor, blushOpacity, blushStyle,
     contourColor, contourIntensity, contourStyle,
     eyeshadowColor, eyeshadowOpacity,
     setFoundation, setConcealer, setBlush, setContour,
@@ -231,6 +231,8 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
         makeupFoundationType={foundationType === 'dewy' ? 1 : foundationType === 'sheer' ? 2 : foundationType === 'satin' ? 3 : foundationType === 'luminous' ? 4 : 0}
         makeupFoundationBlur={foundationBlur}
         makeupConcealerStyle={concealerStyleInt}
+        makeupLipstickFinish={lipstickFinish === 'satin' ? 1 : lipstickFinish === 'glossy' ? 2 : lipstickFinish === 'sheer' ? 3 : lipstickFinish === 'shimmer' ? 4 : 0}
+        makeupLipstickGlossiness={lipstickGlossiness}
         showMakeup={compareMode ? showMakeupValue : 1.0}
       />
 

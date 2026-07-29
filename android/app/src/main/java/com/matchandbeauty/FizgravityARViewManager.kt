@@ -97,6 +97,17 @@ class FizgravityARViewManager : SimpleViewManager<FizgravityARView>() {
         FizgravityRenderer.nativeSetMakeupStyle(2, style)
     }
 
+    // Lipstick finish: 0=matte, 1=satin, 2=glossy, 3=sheer, 4=shimmer.
+    @com.facebook.react.uimanager.annotations.ReactProp(name = "makeupLipstickFinish", defaultInt = 0)
+    fun setMakeupLipstickFinish(view: FizgravityARView, style: Int) {
+        FizgravityRenderer.nativeSetMakeupStyle(0, style)
+    }
+
+    @com.facebook.react.uimanager.annotations.ReactProp(name = "makeupLipstickGlossiness", defaultFloat = 0.5f)
+    fun setMakeupLipstickGlossiness(view: FizgravityARView, value: Float) {
+        FizgravityRenderer.nativeSetLipstickGlossiness(value)
+    }
+
     @com.facebook.react.uimanager.annotations.ReactProp(name = "makeupFoundationBlur", defaultFloat = 0.0f)
     fun setMakeupFoundationBlur(view: FizgravityARView, radius: Float) {
         FizgravityRenderer.nativeSetFoundationBlur(radius)

@@ -196,6 +196,8 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
     uniform vec4 uEyeshadowColor;
     uniform vec4 uLipstickColor;
     uniform vec4 uConcealerColor;
+    uniform int uLipstickFinish; // 0=matte, 1=satin, 2=glossy, 3=sheer, 4=shimmer
+    uniform float uLipstickGlossiness;
 
     // Ambient lighting estimation (from face-as-diffuse-light-probe analysis)
     uniform float uAmbientCCT;       // Kelvin
@@ -286,6 +288,10 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
         // real coverage off the outer edge instead of fixing a bleed that no longer
         // exists (confirmed on-device: rendered lipstick fell visibly short of the true
         // vermilion border after the geometry fix, until this was removed).
+        // Raw baked mask (0=outer/vermilion edge .. 1=inner edge), kept UN-remapped here —
+        // foundationMask below excludes the lip AREA from foundation regardless of which
+        // lipstick finish is chosen (a real MUA keeps foundation off lips no matter what
+        // finish goes on top), so it must not shrink/grow with the finish-specific curve.
         float lipMask = texture2D(sLipMaskTex, vTexCoord).r;
 
         float foundationMask = faceMask * (1.0 - lipMask);
@@ -299,7 +305,25 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
         // faceMask made lipstick visibly gap open along that seam even with the mouth
         // shut (confirmed on-device). lipMask is already tightly scoped to the lip
         // landmarks on its own and doesn't need the broader face gate.
-        float lipAlpha       = lipMask;
+        //
+        // Finish-specific alpha remap (TAMO research: matte/satin/glossy/sheer/shimmer
+        // aren't the same coverage curve at different intensities — sheer's capped-low,
+        // wide-feather translucency isn't reachable by "turning down" matte's curve, and
+        // shimmer's per-point sparkle isn't reachable by "turning up" glossy's curve).
+        // Curves are hand-tuned starting points (see conversation), not a measured
+        // reference dataset — expect to keep refining these against real photos.
+        float lipAlpha;
+        if (uLipstickFinish == 1) { // Satin: softer ramp, still near-full coverage
+            lipAlpha = smoothstep(0.10, 0.40, lipMask);
+        } else if (uLipstickFinish == 2) { // Glossy: semi-transparent base, relies on highlight for fullness
+            lipAlpha = smoothstep(0.10, 0.35, lipMask) * 0.6;
+        } else if (uLipstickFinish == 3) { // Sheer: capped low, wide feather, natural lip shows through
+            lipAlpha = smoothstep(0.30, 0.85, lipMask) * 0.35;
+        } else if (uLipstickFinish == 4) { // Shimmer: same base coverage as satin, sparkle added at composite
+            lipAlpha = smoothstep(0.10, 0.35, lipMask);
+        } else { // Matte (0, default): hard edge, near-opaque, no highlight
+            lipAlpha = smoothstep(0.05, 0.20, lipMask);
+        }
         float eyeAlpha       = texture2D(sEyeMaskTex, vTexCoord).r * faceMask;
         float concealerAlpha = texture2D(sConcealerMaskTex, vTexCoord).r * faceMask;
 
@@ -427,10 +451,33 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             vec3 pigmentedEye = mix(overlayEye, tintedEyeshadowColor, 0.5);
             currentSkin = mix(currentSkin, pigmentedEye, eyeAlpha * uEyeshadowColor.a);
 
-            // [10] LIPSTICK (Matte / Multiply)
+            // [10] LIPSTICK — base tint (multiply, real MUA-accurate technique: color
+            // modulates the underlying lip's own shading/texture instead of flatly
+            // replacing it) is shared by all finishes; glossy/satin/shimmer add a
+            // highlight layer on top (TAMO research: production AR makeup apps use a
+            // separate highlight/shine pass rather than folding shine into the base
+            // blend — a single blend mode can't represent both a flat matte color and a
+            // glossy specular sheen).
             vec3 tintedLipstickColor = uLipstickColor.rgb * ambientTint;
             vec3 lipMultiply = currentSkin * tintedLipstickColor;
             currentSkin = mix(currentSkin, lipMultiply, lipAlpha * uLipstickColor.a);
+
+            // Cheap "highlight ridge" proxy: peaks at lipMask==0.5 (roughly the most
+            // protruding/central part of the lip surface between outer and inner edge),
+            // without needing real per-pixel normals/lighting — reuses the mask value we
+            // already have instead of adding new geometry data.
+            if (uLipstickFinish == 1) { // Satin: subtle, wide sheen
+                float lipRidge = clamp(1.0 - abs(lipMask - 0.5) * 2.0, 0.0, 1.0);
+                currentSkin += vec3(lipRidge * 0.2 * uLipstickGlossiness * lipAlpha);
+            } else if (uLipstickFinish == 2) { // Glossy: tight, bright specular
+                float lipRidge = clamp(1.0 - abs(lipMask - 0.5) * 2.0, 0.0, 1.0);
+                lipRidge = lipRidge * lipRidge * lipRidge;
+                currentSkin += vec3(lipRidge * 0.7 * uLipstickGlossiness * lipAlpha);
+            } else if (uLipstickFinish == 4) { // Shimmer: sparse bright sparkle points, not one coherent highlight
+                float sparkleNoise = fract(sin(dot(vTexCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+                float sparkle = step(0.9, sparkleNoise);
+                currentSkin += vec3(sparkle * 0.5 * uLipstickGlossiness * lipAlpha);
+            }
 
             // Before/after split-screen comparison: uShowMakeup is a horizontal divider
             // position (0.0 = divider at the left edge, so the whole frame is raw; 1.0 =
@@ -576,6 +623,8 @@ struct RendererContext {
     GLint fndAmbientCctHandle;
     GLint fndAmbientIntensityHandle;
     GLint fndShowMakeupHandle;
+    GLint fndLipstickFinishHandle;
+    GLint fndLipstickGlossinessHandle;
 
     // --- Makeup Mesh Program (Blush, Contour rendered directly on face mesh) ---
     GLuint makeupWeightProgram;
@@ -607,6 +656,8 @@ struct RendererContext {
     float highlightColor[4] = {1.0f, 0.95f, 0.85f, 0.0f};
     float blushColor[4] = {0.8f, 0.3f, 0.4f, 0.0f};
     float lipstickColor[4] = {0.6f, 0.1f, 0.15f, 0.0f};
+    int lipstickFinish = 0; // 0=matte, 1=satin, 2=glossy, 3=sheer, 4=shimmer
+    float lipstickGlossiness = 0.5f;
     float eyeshadowColor[4] = {0.3f, 0.2f, 0.15f, 0.0f};
     float concealerColor[4] = {0.85f, 0.65f, 0.5f, 0.0f};
     
@@ -679,6 +730,8 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     gCtx.fndHighlightColorHandle = glGetUniformLocation(gCtx.foundationProgram, "uHighlightColor");
     gCtx.fndBlushColorHandle = glGetUniformLocation(gCtx.foundationProgram, "uBlushColor");
     gCtx.fndLipstickColorHandle = glGetUniformLocation(gCtx.foundationProgram, "uLipstickColor");
+    gCtx.fndLipstickFinishHandle = glGetUniformLocation(gCtx.foundationProgram, "uLipstickFinish");
+    gCtx.fndLipstickGlossinessHandle = glGetUniformLocation(gCtx.foundationProgram, "uLipstickGlossiness");
     gCtx.fndLipMaskTexHandle = glGetUniformLocation(gCtx.foundationProgram, "sLipMaskTex");
     gCtx.fndEyeshadowColorHandle = glGetUniformLocation(gCtx.foundationProgram, "uEyeshadowColor");
     gCtx.fndEyeMaskTexHandle = glGetUniformLocation(gCtx.foundationProgram, "sEyeMaskTex");
@@ -705,6 +758,8 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     if (gCtx.fndHighlightColorHandle == -1) LOGE("Foundation shader: uniform 'uHighlightColor' not found");
     if (gCtx.fndBlushColorHandle == -1) LOGE("Foundation shader: uniform 'uBlushColor' not found");
     if (gCtx.fndLipstickColorHandle == -1) LOGE("Foundation shader: uniform 'uLipstickColor' not found");
+    if (gCtx.fndLipstickFinishHandle == -1) LOGE("Foundation shader: uniform 'uLipstickFinish' not found");
+    if (gCtx.fndLipstickGlossinessHandle == -1) LOGE("Foundation shader: uniform 'uLipstickGlossiness' not found");
     if (gCtx.fndLipMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sLipMaskTex' not found");
     if (gCtx.fndEyeshadowColorHandle == -1) LOGE("Foundation shader: uniform 'uEyeshadowColor' not found");
     if (gCtx.fndEyeMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sEyeMaskTex' not found");
@@ -1179,10 +1234,18 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
 
                 LipVec3 ctrlPos[11];
                 float ctrlAlphaOuter[11], ctrlAlphaInner[11];
+                // Baked mask raw value: 0 (outer/vermilion edge) .. 1 (inner edge).
+                // Reverted the earlier diagnostic (which set this to 1.0/solid to isolate
+                // a geometry-vs-alpha question — confirmed: geometry margin was already
+                // correct, the "faded" look was alpha) — the shader now applies its OWN
+                // finish-specific remap (matte/satin/glossy/sheer/shimmer, see PASS 3's
+                // fragment shader) on top of this raw gradient, so this needs to stay a
+                // real 0..1 gradient across the lip width for those remaps to have
+                // anything to work with, not a flat 1.0.
                 for (int i = 0; i < 11; i++) { ctrlAlphaOuter[i] = 0.15f; ctrlAlphaInner[i] = 1.0f; }
 
-                static LipVec3 lipSubPos[6 * PTS_PER_CONTOUR];
-                static float lipSubAlpha[6 * PTS_PER_CONTOUR];
+                static LipVec3 lipSubPos[8 * PTS_PER_CONTOUR];
+                static float lipSubAlpha[8 * PTS_PER_CONTOUR];
                 int base = 0;
                 int upperOuterBase, upperInnerBase, lowerOuterBase, lowerInnerBase;
 
@@ -1224,17 +1287,91 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
                     float mouthWidth = sqrtf(mdx * mdx + mdy * mdy + mdz * mdz);
                     if (mouthWidth < 1e-5f) mouthWidth = 1e-5f;
 
+                    // ONE global "how open is the mouth" measurement (the gap at the
+                    // horizontal center point), instead of a per-point local gap. This
+                    // exists ONLY to patch tracking noise at a truly-shut mouth (upper/
+                    // lower inner contours SHOULD coincide when closed but don't quite,
+                    // per MediaPipe's own imprecision) — it is not meant to be the thing
+                    // that visually defines "how open is the mouth." That job already
+                    // belongs to the real upperInner/lowerInner curves themselves (drawn
+                    // via the outer<->inner strips above, right up to their true tracked
+                    // positions) — those already trace the mouth's actual elongated shape
+                    // correctly on their own.
+                    //
+                    // A PER-POINT gap (tried first) meant each point along the width
+                    // crossed its own open/closed threshold at a different moment as the
+                    // mouth opened/closed — since a real mouth's opening profile isn't a
+                    // sharp center-peaked parabola, most points cross around the same
+                    // time but not exactly together, and the tiny stagger reads as the
+                    // seam's covered/uncovered boundary visibly sweeping in from the
+                    // sides toward the center (user: "seperti ada garis vertikal pelan
+                    // pelan mendekat [dari kiri kanan]") instead of a natural top-meets-
+                    // bottom closure. Driving every point's alpha off ONE shared value
+                    // makes the whole central seam appear/disappear together as a single
+                    // unit — nothing to sweep.
+                    int centerIdx = PTS_PER_CONTOUR / 2;
+                    LipVec3 cpu = lipSubPos[upperInnerBase + centerIdx];
+                    LipVec3 cpl = lipSubPos[lowerInnerBase + centerIdx];
+                    float cdx = cpu.x - cpl.x, cdy = cpu.y - cpl.y, cdz = cpu.z - cpl.z;
+                    float centerRelGap = sqrtf(cdx * cdx + cdy * cdy + cdz * cdz) / mouthWidth;
+
+                    // Temporal smoothing (exponential moving average across frames): the
+                    // 1%-3% window below is tight enough that ordinary per-frame tracking
+                    // jitter (worse during camera movement — head pose/perspective noise
+                    // feeds into the landmark position, not just genuine mouth motion) can
+                    // cross it on its own, making the seam flicker open/closed with no
+                    // real mouth movement (user: "kalau kamera digerak-gerakan kadang
+                    // lipstick mangap nutup sendiri"). A static (persists across frames)
+                    // smoothed value damps that frame-to-frame noise while still tracking
+                    // real mouth motion within a few frames. Lowered 0.3 -> 0.15 per user
+                    // request: flicker still visible at 0.3 when the camera was far from
+                    // the face and moved around (farther distance = smaller pixel/landmark
+                    // displacement for the same real-world gap, so tracking noise is
+                    // proportionally larger relative to the signal there) — user
+                    // explicitly traded a bit more lag on real mouth transitions for
+                    // steadiness in that case.
+                    static float smoothedCenterRelGap = 0.0f;
+                    const float SEAM_SMOOTHING = 0.15f;
+                    smoothedCenterRelGap += SEAM_SMOOTHING * (centerRelGap - smoothedCenterRelGap);
+
+                    // Near-binary snap so the seam only ever contributes a few-pixel
+                    // anti-noise patch; the moment there's genuine daylight between the
+                    // lips, the seam gets out of the way almost immediately and the real
+                    // geometry takes over the whole visual. Tightened from 2%-6%: user
+                    // confirmed mask still read as fully closed while teeth were still
+                    // visibly parted, meaning even a "just barely opening" gap (a few mm)
+                    // was still landing inside the old window.
+                    float t = (smoothedCenterRelGap - 0.01f) / (0.03f - 0.01f);
+                    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+                    float globalSeamAlpha = 1.0f - t;
+
                     for (int i = 0; i < PTS_PER_CONTOUR; i++) {
                         LipVec3 pu = lipSubPos[upperInnerBase + i];
                         LipVec3 pl = lipSubPos[lowerInnerBase + i];
-                        float dx = pu.x - pl.x, dy = pu.y - pl.y, dz = pu.z - pl.z;
-                        float relGap = sqrtf(dx * dx + dy * dy + dz * dz) / mouthWidth;
-                        // Below ~5% of mouth width: treat as closed (full seam alpha).
-                        // Above ~35%: clearly open, seam alpha fades to 0 so the real
-                        // camera cavity/teeth show through via the raw-passthrough path.
-                        float t = (relGap - 0.05f) / (0.35f - 0.05f);
-                        t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
-                        float seamAlpha = 1.0f - (t * t * (3.0f - 2.0f * t)); // smoothstep, inverted
+                        float seamAlpha = globalSeamAlpha;
+
+                        // Corner lock: UPPER_LIP_INNER and LOWER_LIP_INNER share the exact
+                        // same two corner landmarks (78, 308) — pu==pl exactly (same
+                        // MediaPipe landmark read twice) right at i=0/i=last, zero gap
+                        // ALWAYS, by construction — no tracking noise is possible there.
+                        // A prior version locked a wide 25%-of-width zone near each corner
+                        // to solid alpha, which overcorrected: it painted over the natural
+                        // V-taper shape that the real upperOuter->upperInner and
+                        // lowerOuter->lowerInner strips already form on their own as they
+                        // converge toward that shared corner vertex, so the corner read as
+                        // a blunt filled patch instead of a proper pointed corner (user:
+                        // "ko tidak membentuk sudut ya bang"). Narrowed to a tiny lock zone
+                        // (4% of the way to center) — just enough to smooth over the
+                        // sub-pixel Catmull-Rom subdivision artifact right at the shared
+                        // vertex — so the real geometry's natural taper is what defines the
+                        // corner shape almost everywhere else.
+                        float distFromCorner = (float)(i < PTS_PER_CONTOUR - 1 - i ? i : PTS_PER_CONTOUR - 1 - i);
+                        float distFromCornerNorm = distFromCorner / (float)(PTS_PER_CONTOUR / 2);
+                        float cl = distFromCornerNorm / 0.04f;
+                        cl = cl < 0.0f ? 0.0f : (cl > 1.0f ? 1.0f : cl);
+                        float cornerLock = 1.0f - (cl * cl * (3.0f - 2.0f * cl)); // smoothstep, inverted
+                        if (cornerLock > seamAlpha) seamAlpha = cornerLock;
+
                         lipSubPos[seamUpperBase + i] = pu;
                         lipSubPos[seamLowerBase + i] = pl;
                         lipSubAlpha[seamUpperBase + i] = seamAlpha;
@@ -1242,11 +1379,68 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
                     }
                 }
 
+                // Outer margin halo: a thin extra band just beyond the true
+                // UPPER/LOWER_LIP_OUTER landmarks, fading from the existing outer-edge
+                // alpha (0.15) down to 0 over a small outward push. MediaPipe's outer lip
+                // landmarks track a fixed topological ring, which sits slightly inside the
+                // visible vermilion edge for thick or slightly-folded lips — user confirmed
+                // the boundary SHAPE is precise, it's just uniformly a bit inside the real
+                // lip line. Re-added deliberately isolated from the seam mechanism above
+                // (reads upperInnerBase/lowerInnerBase for direction only, never writes to
+                // them or to the seam buffers) after two earlier combined attempts
+                // regressed elsewhere — this version only touches its own dedicated
+                // expandedUpper/LowerOuterBase buffers.
+                //
+                // Direction is derived per-point as (outer - inner) at the SAME contour
+                // index, NOT from a single shared mouth centroid — a centroid-based radial
+                // push (tried first) went wrong right at the mouth corners, where "away
+                // from centroid" pointed down into the mouth cavity instead of outward.
+                // (outer - inner) always points from the mouth interior toward the true
+                // outside by construction, and naturally shrinks to ~0 right at the
+                // corners (where outer and inner nearly coincide), so it can't push into
+                // the cavity there either.
+                // Plain 2-row quad, fading from the true landmark's OWN alpha (0.15,
+                // continuous — no jump) down to 0 at the pushed-out tip. (A 3-ring
+                // "near-solid then sharp drop" version existed briefly to make a flat
+                // diagnostic test color look solid, but that was compensating for the
+                // now-reverted 1.0 diagnostic alpha; with the real 0.15 outer alpha
+                // restored and finish-specific curves now doing the "how solid" job in
+                // the shader, a 3rd ring here would just double up on that decision.)
+                int expandedUpperOuterBase = base;
+                int expandedLowerOuterBase = base + PTS_PER_CONTOUR;
+                base += 2 * PTS_PER_CONTOUR;
+                {
+                    LipVec3 cornerL = lipSubPos[upperOuterBase];
+                    LipVec3 cornerR = lipSubPos[upperOuterBase + PTS_PER_CONTOUR - 1];
+                    float mdx = cornerR.x - cornerL.x, mdy = cornerR.y - cornerL.y;
+                    float mouthWidth = sqrtf(mdx * mdx + mdy * mdy);
+                    if (mouthWidth < 1e-5f) mouthWidth = 1e-5f;
+                    // Small on purpose — a forgiving margin for thick/folded lips, not a
+                    // general resize of the lip shape. 0.0675 = user-calibrated value
+                    // (1.5x an initial 0.045 that was still slightly short).
+                    float pushDist = 0.0675f * mouthWidth;
+
+                    auto expandOutward = [&](int outerBase, int innerBase, int dstBase) {
+                        for (int i = 0; i < PTS_PER_CONTOUR; i++) {
+                            LipVec3 p = lipSubPos[outerBase + i];
+                            LipVec3 q = lipSubPos[innerBase + i];
+                            float dx = p.x - q.x, dy = p.y - q.y;
+                            float len = sqrtf(dx * dx + dy * dy);
+                            float nx = len > 1e-5f ? dx / len : 0.0f;
+                            float ny = len > 1e-5f ? dy / len : 0.0f;
+                            lipSubPos[dstBase + i] = LipVec3{ p.x + nx * pushDist, p.y + ny * pushDist, p.z };
+                            lipSubAlpha[dstBase + i] = 0.0f;
+                        }
+                    };
+                    expandOutward(upperOuterBase, upperInnerBase, expandedUpperOuterBase);
+                    expandOutward(lowerOuterBase, lowerInnerBase, expandedLowerOuterBase);
+                }
+
                 // Quad-strip triangulation across the subdivided (dense) contours —
                 // same pattern as before, just over PTS_PER_CONTOUR-1 segments instead
                 // of 10, and using LOCAL indices into lipSubPos/lipSubAlpha rather than
                 // MediaPipe landmark indices.
-                static unsigned short lipTriangleIndices[6 * (10 * 6) * 6]; // generous upper bound
+                static unsigned short lipTriangleIndices[6 * (10 * 6) * 6]; // generous upper bound (5 strips currently)
                 int lipIdx = 0;
                 auto addQuadStrip = [&](int outerBase, int innerBase) {
                     for (int i = 0; i < PTS_PER_CONTOUR - 1; i++) {
@@ -1261,6 +1455,8 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
                 addQuadStrip(upperOuterBase, upperInnerBase);
                 addQuadStrip(lowerOuterBase, lowerInnerBase);
                 addQuadStrip(seamUpperBase, seamLowerBase);
+                addQuadStrip(expandedUpperOuterBase, upperOuterBase);
+                addQuadStrip(expandedLowerOuterBase, lowerOuterBase);
 
                 glVertexAttribPointer(gCtx.mkPositionHandle, 3, GL_FLOAT, GL_FALSE, sizeof(LipVec3), lipSubPos);
                 glEnableVertexAttribArray(gCtx.mkPositionHandle);
@@ -1481,6 +1677,8 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
     glUniform4fv(gCtx.fndBlushColorHandle, 1, gCtx.blushColor);
     glUniform4fv(gCtx.fndEyeshadowColorHandle, 1, gCtx.eyeshadowColor);
     glUniform4fv(gCtx.fndLipstickColorHandle, 1, gCtx.lipstickColor);
+    glUniform1i(gCtx.fndLipstickFinishHandle, gCtx.lipstickFinish);
+    glUniform1f(gCtx.fndLipstickGlossinessHandle, gCtx.lipstickGlossiness);
     glUniform4fv(gCtx.fndConcealerColorHandle, 1, gCtx.concealerColor);
     glUniform1i(gCtx.fndConcealerStyleHandle, gCtx.concealerStyle);
     glUniform1f(gCtx.fndAmbientCctHandle, gCtx.ambientCctKelvin);
@@ -1523,6 +1721,11 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeSetFoundationBlur(JNIEnv* env, 
 }
 
 JNIEXPORT void JNICALL
+Java_com_matchandbeauty_FizgravityRenderer_nativeSetLipstickGlossiness(JNIEnv* env, jclass clazz, jfloat value) {
+    gCtx.lipstickGlossiness = value;
+}
+
+JNIEXPORT void JNICALL
 Java_com_matchandbeauty_FizgravityRenderer_nativeSetAmbientLighting(JNIEnv* env, jclass clazz, jfloat cctKelvin, jfloat intensity) {
     gCtx.ambientCctKelvin = cctKelvin;
     gCtx.ambientIntensity = intensity;
@@ -1540,7 +1743,9 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeSetConcealerStyle(JNIEnv* env, 
 
 JNIEXPORT void JNICALL
 Java_com_matchandbeauty_FizgravityRenderer_nativeSetMakeupStyle(JNIEnv* env, jclass clazz, jint regionType, jint style) {
-    if (regionType == 1) { // Blush Style
+    if (regionType == 0) { // Lipstick Finish (0=matte, 1=satin, 2=glossy, 3=sheer, 4=shimmer)
+        gCtx.lipstickFinish = style;
+    } else if (regionType == 1) { // Blush Style
         // 0 = Apple of Cheek, 1 = Draped/Lifting, 2 = Sun-kissed horizontal.
         // Consumed live in the BLUSH weight-baking pass (nativeDrawSyncFrame).
         gCtx.blushStyle = style;

@@ -26,6 +26,7 @@ export interface MakeupState {
   lipstickColor: string;
   lipstickGlossiness: number;
   lipstickOpacity: number;
+  lipstickFinish: 'matte' | 'satin' | 'glossy' | 'sheer' | 'shimmer';
 
   eyeshadowColor: string;
   eyeshadowOpacity: number;
@@ -49,7 +50,7 @@ export interface MakeupState {
   setConcealer: (settings: Partial<Pick<MakeupState, 'concealerColor' | 'concealerOpacity' | 'concealerStyle'>>) => void;
   setBlush: (settings: Partial<Pick<MakeupState, 'blushColor' | 'blushOpacity' | 'blushStyle'>>) => void;
   setContour: (settings: Partial<Pick<MakeupState, 'contourColor' | 'contourIntensity' | 'contourStyle'>>) => void;
-  setLipstick: (settings: Partial<Pick<MakeupState, 'lipstickColor' | 'lipstickGlossiness' | 'lipstickOpacity'>>) => void;
+  setLipstick: (settings: Partial<Pick<MakeupState, 'lipstickColor' | 'lipstickGlossiness' | 'lipstickOpacity' | 'lipstickFinish'>>) => void;
   setEyeshadow: (settings: Partial<Pick<MakeupState, 'eyeshadowColor' | 'eyeshadowOpacity' | 'eyeshadowStyle'>>) => void;
   setDiagnostics: (results: Partial<Pick<MakeupState, 'faceShape' | 'eyeShape' | 'noseShape' | 'jawWidth' | 'faceLength' | 'canthalTilt' | 'eyeAspectRatio' | 'alarBaseWidth' | 'intercanthalDistance'>>) => void;
   setAIMode: (mode: AIMode) => void;
@@ -76,11 +77,15 @@ const initialMakeup = {
   contourIntensity: 0.0,
   contourStyle: 'normal' as const,
 
-  lipstickColor: '#00FF00', // DIAGNOSTIC (temporary): verify outer edge now reaches the
-                             // true vermilion border after removing the over-aggressive
-                             // smoothstep — revert after checking.
+  // TESTING (temporary): a realistic red instead of the earlier diagnostic solid
+  // green — now that mask boundary precision is confirmed, testing has moved on to
+  // finish (matte/satin/glossy/sheer/shimmer) realism, which needs a real color to
+  // judge against reference photos. Revert to '#00000000'/0.0 (off by default, like
+  // every other layer) once a proper finish-picker UI exists in TryOnScreen.
+  lipstickColor: '#C0392B',
   lipstickGlossiness: 0.5,
   lipstickOpacity: 1.0,
+  lipstickFinish: 'matte',
 
   eyeshadowColor: '#00000000',
   eyeshadowOpacity: 0.0,
@@ -179,6 +184,7 @@ export const useMakeupStore = create<MakeupState>((set, get) => ({
     const finalLipstickColor = '#C0392B'; // Rich crimson/rose
     const finalLipstickGlossiness = 0.75; // Premium gloss specular
     const finalLipstickOpacity = 0.8;
+    const finalLipstickFinish: MakeupState['lipstickFinish'] = 'glossy';
 
     // Foundation
     const finalFoundationBlur = 12.0; // High smoothing
@@ -200,6 +206,7 @@ export const useMakeupStore = create<MakeupState>((set, get) => ({
       lipstickColor: finalLipstickColor,
       lipstickGlossiness: finalLipstickGlossiness,
       lipstickOpacity: finalLipstickOpacity,
+      lipstickFinish: finalLipstickFinish,
 
       foundationBlur: finalFoundationBlur,
       foundationOpacity: finalFoundationOpacity,
