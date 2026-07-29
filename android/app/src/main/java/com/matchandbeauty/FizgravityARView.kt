@@ -231,8 +231,27 @@ class FizgravityARView @JvmOverloads constructor(
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         FizgravityRenderer.nativeInitGL()
+        loadGlitterTexture()
         cameraTextureId = createCameraTexture()
         post { startCamera() }
+    }
+
+    // One-time upload of the shimmer finish's tileable speckle texture (see
+    // scripts/generate_glitter_texture.py + FizgravityRenderer.cpp's PASS 3 for the
+    // TAMO research behind switching from procedural noise to a real texture asset).
+    private fun loadGlitterTexture() {
+        try {
+            context.assets.open("glitter_texture.png").use { stream ->
+                val bitmap = android.graphics.BitmapFactory.decodeStream(stream)
+                val buffer = ByteBuffer.allocateDirect(bitmap.byteCount)
+                bitmap.copyPixelsToBuffer(buffer)
+                buffer.rewind()
+                FizgravityRenderer.nativeLoadGlitterTexture(buffer, bitmap.width, bitmap.height)
+                bitmap.recycle()
+            }
+        } catch (e: Exception) {
+            Log.e("FizgravityARView", "Glitter texture load error: ${e.message}")
+        }
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {

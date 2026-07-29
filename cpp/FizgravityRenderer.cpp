@@ -185,6 +185,7 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
     uniform sampler2D sLipMaskTex;
     uniform sampler2D sEyeMaskTex;
     uniform sampler2D sConcealerMaskTex;
+    uniform sampler2D sGlitterTex; // tileable grayscale speckle texture (see PASS 3 setup), shimmer finish only
 
     // UI Colors
     uniform vec4 uFoundationColor;
@@ -252,6 +253,19 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
                     blendOverlayChannel(base.g, blend.g),
                     blendOverlayChannel(base.b, blend.b));
     }
+
+    // Six rounds of procedural noise (screen-space noise, sin()-based hash breaking
+    // down in mobile mediump precision, weak vec2 hash banding, hand-placed dots too
+    // sparse, a 60x12 grid+hash still too sparse per the user's reference photo, a
+    // sin(time)-based twinkle the user didn't actually want) all fell short of a real
+    // glitter lipstick's dense, non-banded coverage. TAMO research pass: real AR
+    // glitter filters (Snap Lens Studio's Glam & Glitter plugin) composite a
+    // PRE-AUTHORED sparkle texture over the lip UVs rather than solving noise math
+    // live — texture-authoring for coverage/placement, shader math only for color/
+    // blend. Switched to that: sGlitterTex (see PASS 3 setup) is a small tileable
+    // grayscale speckle PNG, generated once offline (same Python/PIL toolchain this
+    // project already uses for mesh index/UV generation per CLAUDE.md), sampled
+    // directly in the shimmer branch below with GL_REPEAT wrapping doing the tiling.
 
     vec3 cctToTint(float cctKelvin) {
         // Simple, robust warm<->cool tint anchored at neutral daylight (6500K) = white (1,1,1).
@@ -505,57 +519,34 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
                 vec2 dCupid = vec2(lipU - 0.5, lipMask - 0.3) / vec2(0.10, 0.12);
                 float cupidHighlight = pow(clamp(1.0 - dot(dCupid, dCupid), 0.0, 1.0), 3.0) * (1.0 - lipLowerWeight);
                 currentSkin += vec3(cupidHighlight * 0.35 * uLipstickGlossiness * lipAlpha);
-            } else if (uLipstickFinish == 4) { // Shimmer: sparse bright sparkle points, not one coherent highlight
-                // Went through several rounds of procedural noise (see git history)
-                // trying to get this right: screen-space noise (invisible — lip covers
-                // too little of the frame), a sin()-based hash (degrades in mobile
-                // mediump precision — still invisible), a weak vec2 hash mix (banded
-                // into horizontal stripes), a per-cell hash+round-dot version (still
-                // elongated, and biased to one side — the cheap integer-cell hash just
-                // doesn't have good enough distribution at this grid size on this
-                // hardware). Switched to a small FIXED constellation of sparkle points
-                // instead of procedural randomness — no hash, so no hash bugs.
+            } else if (uLipstickFinish == 4) { // Shimmer: glitter texture, tiled across the lip
+                // Tile counts are unequal on purpose — same reasoning as every earlier
+                // procedural attempt: the lip's outer->inner "band" (mask axis) is much
+                // shorter on screen than its corner-to-corner width (u axis), roughly
+                // 5:1, so tiling the mask axis fewer times keeps each tile looking
+                // square on screen instead of stretched. GL_TEXTURE_WRAP_S/T are set to
+                // GL_REPEAT on this texture (see nativeLoadGlitterTexture), so UVs
+                // outside 0..1 tile automatically — no manual fract() needed.
                 //
-                // Each dot needs an ANISOTROPIC radius, not a uniform one: the lip's
-                // outer->inner "band" (the mask axis) is much SHORTER on screen than its
-                // corner-to-corner width (the u axis), so a dot with equal radius in
-                // normalized (u, mask) units renders far wider than tall on screen. First
-                // attempt scaled the mask axis UP (÷ a small number) before measuring
-                // distance, which is backwards — that shrinks the effective radius in the
-                // shorter axis even further, producing exactly the long thin horizontal
-                // streaks reported ("garis garis horizontal tipis panjang"). Correct
-                // direction: give the mask axis a LARGER radius (dividing by a bigger
-                // number) to compensate for its physically compressed scale.
-                // 6 large dots read as polka-dots, not glitter (user: "kegedean
-                // titiknya") — real shimmer is many FINE flecks. Widened to 20 points,
-                // radius shrunk ~3x, scattered irregularly (not a clean grid, which
-                // would look artificial/mechanical rather than like real glitter
-                // particles).
-                vec2 lipUV = vec2(lipU, lipMask);
-                vec2 dotRadius = vec2(0.016, 0.08); // (u radius, mask radius) — mask >> u on purpose
-                float sparkle = 0.0;
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.08, 0.30)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.15, 0.55)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.12, 0.75)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.22, 0.42)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.28, 0.68)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.35, 0.25)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.38, 0.58)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.45, 0.80)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.42, 0.35)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.50, 0.50)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.55, 0.28)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.58, 0.65)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.62, 0.42)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.68, 0.75)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.72, 0.30)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.78, 0.55)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.82, 0.38)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.88, 0.62)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.92, 0.45)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.90, 0.78)) / dotRadius));
-                sparkle = clamp(sparkle, 0.0, 1.0);
-                currentSkin += vec3(sparkle * 0.8 * uLipstickGlossiness * lipAlpha);
+                // (30, 6) was WAY too high a repeat count: each tile ended up only ~10
+                // screen px wide on a typical close-up selfie, minifying the texture's
+                // few-pixel flecks down to sub-pixel noise that read as flat "TV static"
+                // instead of individual sparkle points (confirmed on-device). Tile count
+                // needs to keep each tile large enough on screen that its flecks stay a
+                // few real pixels across — (6, 1.2) keeps tiles around 40-60px instead.
+                vec2 glitterUV = vec2(lipU * 6.0, lipMask * 1.2);
+                float sparkle = texture2D(sGlitterTex, glitterUV).r;
+                // A plain additive term (`currentSkin += sparkle * 0.55 * ...`) read as
+                // a dull, muted pale-pink wash rather than bright sparkle (user: "kurang
+                // light untuk teksturnya") — adding at most ~0.5 brightness to an
+                // already-dark red base never gets close to a genuine bright/white
+                // catch-light. Mixing TOWARD white instead lets the brightest fleck
+                // cores read as a real bright glint while dim/background texture values
+                // (mix factor near 0) leave the base lipstick color untouched — same
+                // "sits on top as an accent" balance as before, just with real contrast
+                // at the peaks instead of a flat brightness bump everywhere.
+                float sparkleIntensity = sparkle * uLipstickGlossiness * lipAlpha;
+                currentSkin = mix(currentSkin, vec3(1.0), sparkleIntensity * 0.85);
             }
 
             // Before/after split-screen comparison: uShowMakeup is a horizontal divider
@@ -704,6 +695,7 @@ struct RendererContext {
     GLint fndShowMakeupHandle;
     GLint fndLipstickFinishHandle;
     GLint fndLipstickGlossinessHandle;
+    GLint fndGlitterTexHandle;
 
     // --- Makeup Mesh Program (Blush, Contour rendered directly on face mesh) ---
     GLuint makeupWeightProgram;
@@ -750,6 +742,8 @@ struct RendererContext {
     float ambientIntensity = 1.0f;    // Neutral (no darkening) default
 
     float showMakeup = 1.0f; // Before/after slider: 0=raw camera, 1=full makeup (default)
+
+    GLuint glitterTexture = 0; // Tileable shimmer speckle texture, loaded once via nativeLoadGlitterTexture
 
     // Morphology cache (updated at ~5fps to avoid overhead)
     std::string lastFaceShape = "";
@@ -823,6 +817,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     gCtx.fndAmbientCctHandle = glGetUniformLocation(gCtx.foundationProgram, "uAmbientCCT");
     gCtx.fndAmbientIntensityHandle = glGetUniformLocation(gCtx.foundationProgram, "uAmbientIntensity");
     gCtx.fndShowMakeupHandle = glGetUniformLocation(gCtx.foundationProgram, "uShowMakeup");
+    gCtx.fndGlitterTexHandle = glGetUniformLocation(gCtx.foundationProgram, "sGlitterTex");
 
     // Validation logging for foundation shader handles
     if (gCtx.fndPositionHandle == -1) LOGE("Foundation shader: attribute 'aPosition' not found");
@@ -851,6 +846,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     if (gCtx.fndAmbientCctHandle == -1) LOGE("Foundation shader: uniform 'uAmbientCCT' not found");
     if (gCtx.fndAmbientIntensityHandle == -1) LOGE("Foundation shader: uniform 'uAmbientIntensity' not found");
     if (gCtx.fndShowMakeupHandle == -1) LOGE("Foundation shader: uniform 'uShowMakeup' not found");
+    if (gCtx.fndGlitterTexHandle == -1) LOGE("Foundation shader: uniform 'sGlitterTex' not found");
 
     // Blur Shader
     gCtx.blurProgram = createProgram(BLUR_VERTEX_SHADER, BLUR_FRAGMENT_SHADER);
@@ -1809,6 +1805,11 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
     glUniform1f(gCtx.fndAmbientIntensityHandle, gCtx.ambientIntensity);
     glUniform1f(gCtx.fndShowMakeupHandle, gCtx.showMakeup);
 
+    // Bind Glitter texture to Texture Unit 5 (units 0-4 already taken above)
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_2D, gCtx.glitterTexture);
+    glUniform1i(gCtx.fndGlitterTexHandle, 5);
+
     glVertexAttribPointer(gCtx.fndPositionHandle, 2, GL_FLOAT, GL_FALSE, 0, QUAD_VERTICES);
     glEnableVertexAttribArray(gCtx.fndPositionHandle);
     glVertexAttribPointer(gCtx.fndTexCoordHandle, 2, GL_FLOAT, GL_FALSE, 0, FBO_TEX_COORDS);
@@ -1847,6 +1848,31 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeSetFoundationBlur(JNIEnv* env, 
 JNIEXPORT void JNICALL
 Java_com_matchandbeauty_FizgravityRenderer_nativeSetLipstickGlossiness(JNIEnv* env, jclass clazz, jfloat value) {
     gCtx.lipstickGlossiness = value;
+}
+
+// Uploads the tileable shimmer speckle texture ONCE (called from onSurfaceCreated,
+// not per-frame) — buffer is ARGB_8888-decoded RGBA bytes from the PNG asset
+// (Bitmap.copyPixelsToBuffer on the Kotlin side already handles the PNG decode).
+JNIEXPORT void JNICALL
+Java_com_matchandbeauty_FizgravityRenderer_nativeLoadGlitterTexture(JNIEnv* env, jclass clazz, jobject buffer, jint width, jint height) {
+    void* pixels = env->GetDirectBufferAddress(buffer);
+    if (!pixels) {
+        LOGE("nativeLoadGlitterTexture: null buffer");
+        return;
+    }
+    if (gCtx.glitterTexture == 0) {
+        glGenTextures(1, &gCtx.glitterTexture);
+    }
+    glBindTexture(GL_TEXTURE_2D, gCtx.glitterTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    // GL_REPEAT (not CLAMP_TO_EDGE like every other texture in this renderer) is the
+    // whole point here — the shimmer shader samples this at UVs scaled well past 0..1
+    // to tile it densely across the lip, and relies on hardware wrapping to do that
+    // instead of a manual fract() in the shader.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 }
 
 JNIEXPORT void JNICALL
