@@ -526,17 +526,36 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
                 // streaks reported ("garis garis horizontal tipis panjang"). Correct
                 // direction: give the mask axis a LARGER radius (dividing by a bigger
                 // number) to compensate for its physically compressed scale.
+                // 6 large dots read as polka-dots, not glitter (user: "kegedean
+                // titiknya") — real shimmer is many FINE flecks. Widened to 20 points,
+                // radius shrunk ~3x, scattered irregularly (not a clean grid, which
+                // would look artificial/mechanical rather than like real glitter
+                // particles).
                 vec2 lipUV = vec2(lipU, lipMask);
-                vec2 dotRadius = vec2(0.05, 0.25); // (u radius, mask radius) — mask >> u on purpose
+                vec2 dotRadius = vec2(0.016, 0.08); // (u radius, mask radius) — mask >> u on purpose
                 float sparkle = 0.0;
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.15, 0.35)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.30, 0.75)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.45, 0.40)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.55, 0.80)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.70, 0.35)) / dotRadius));
-                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.85, 0.70)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.08, 0.30)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.15, 0.55)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.12, 0.75)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.22, 0.42)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.28, 0.68)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.35, 0.25)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.38, 0.58)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.45, 0.80)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.42, 0.35)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.50, 0.50)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.55, 0.28)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.58, 0.65)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.62, 0.42)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.68, 0.75)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.72, 0.30)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.78, 0.55)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.82, 0.38)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.88, 0.62)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.92, 0.45)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.90, 0.78)) / dotRadius));
                 sparkle = clamp(sparkle, 0.0, 1.0);
-                currentSkin += vec3(sparkle * 0.7 * uLipstickGlossiness * lipAlpha);
+                currentSkin += vec3(sparkle * 0.8 * uLipstickGlossiness * lipAlpha);
             }
 
             // Before/after split-screen comparison: uShowMakeup is a horizontal divider
