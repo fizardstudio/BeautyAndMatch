@@ -92,6 +92,9 @@ class FizgravityARView @JvmOverloads constructor(
     ): Int
 
     private var cameraProvider: ProcessCameraProvider? = null
+    // Held so onDetachedFromWindow can unbind ONLY this view's own use case (see there
+    // for why — unbindAll() was tearing down a freshly re-mounted view's camera).
+    private var imageAnalysisUseCase: ImageAnalysis? = null
     private var cameraTextureId = -1
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
@@ -609,6 +612,7 @@ class FizgravityARView @JvmOverloads constructor(
                 })
 
             val imageAnalysis = imageAnalysisBuilder.build()
+            imageAnalysisUseCase = imageAnalysis
 
             imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
                 val landmarker = faceLandmarker
@@ -910,7 +914,16 @@ class FizgravityARView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
-        try { cameraProvider?.unbindAll() } catch (e: Exception) {}
+        // unbind() the SPECIFIC use case this view owns, not unbindAll() — ProcessCameraProvider
+        // is a process-wide singleton (getInstance() returns the same instance across every
+        // FizgravityARView), and bindToLifecycle() binds to the current Activity's lifecycle,
+        // which stays alive across React Native screen navigation (single-Activity app). If a
+        // freshly re-mounted new instance's startCamera() finishes binding its OWN use case
+        // before this (old, being torn down) instance's onDetachedFromWindow runs, unbindAll()
+        // would tear down the NEW view's binding too — confirmed on-device as "buka AR preview,
+        // back ke home, buka lagi, camera blank hitam".
+        try { imageAnalysisUseCase?.let { cameraProvider?.unbind(it) } } catch (e: Exception) {}
+        imageAnalysisUseCase = null
         cameraExecutor.shutdown()
         try { sensorManager?.unregisterListener(this) } catch (e: Exception) {}
         val ptr = fizgravityEnginePtr
