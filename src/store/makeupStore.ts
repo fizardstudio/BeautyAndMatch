@@ -77,15 +77,15 @@ const initialMakeup = {
   contourIntensity: 0.0,
   contourStyle: 'normal' as const,
 
-  // TESTING (temporary): a realistic red instead of the earlier diagnostic solid
-  // green — now that mask boundary precision is confirmed, testing has moved on to
-  // finish (matte/satin/glossy/sheer/shimmer) realism, which needs a real color to
-  // judge against reference photos. Revert to '#00000000'/0.0 (off by default, like
-  // every other layer) once a proper finish-picker UI exists in TryOnScreen.
+  // TESTING (temporary): visible by default (every other layer starts at
+  // '#00000000'/0.0, off) so the new lipstick finish picker in TryOnScreen has
+  // something on-screen to compare finishes against without an extra tap first.
+  // Switch back to '#00000000'/0.0 once satin/glossy/sheer/shimmer are all
+  // confirmed against real footage via the UI picker.
   lipstickColor: '#C0392B',
   lipstickGlossiness: 0.5,
   lipstickOpacity: 1.0,
-  lipstickFinish: 'matte',
+  lipstickFinish: 'satin',
 
   eyeshadowColor: '#00000000',
   eyeshadowOpacity: 0.0,

@@ -292,7 +292,13 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
         // foundationMask below excludes the lip AREA from foundation regardless of which
         // lipstick finish is chosen (a real MUA keeps foundation off lips no matter what
         // finish goes on top), so it must not shrink/grow with the finish-specific curve.
-        float lipMask = texture2D(sLipMaskTex, vTexCoord).r;
+        // .g = position along the mouth's horizontal width (0..1, corner to corner) and
+        // .b = lower-lip weight (0 upper / 1 lower), baked alongside .r in PASS 1c for the
+        // glossy/satin highlight below — see the highlight comment for why.
+        vec3 lipMaskRGB = texture2D(sLipMaskTex, vTexCoord).rgb;
+        float lipMask = lipMaskRGB.r;
+        float lipU = lipMaskRGB.g;
+        float lipLowerWeight = lipMaskRGB.b;
 
         float foundationMask = faceMask * (1.0 - lipMask);
         float contourAlpha   = mask.g * faceMask;
@@ -318,7 +324,14 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
         } else if (uLipstickFinish == 2) { // Glossy: semi-transparent base, relies on highlight for fullness
             lipAlpha = smoothstep(0.10, 0.35, lipMask) * 0.6;
         } else if (uLipstickFinish == 3) { // Sheer: capped low, wide feather, natural lip shows through
-            lipAlpha = smoothstep(0.30, 0.85, lipMask) * 0.35;
+            // Was smoothstep(0.30, 0.85, ...): with the raw baked mask's actual range
+            // (0.15 at the true outer landmark, up to 1.0 at the inner edge — see
+            // ctrlAlphaOuter above), most of the visible lip surface never reached 0.30
+            // at all, so nearly the whole lip got exactly zero alpha (confirmed on-
+            // device: "sheer blm ada efect apa apa"). Starting the ramp right at the
+            // true outer edge instead means sheer washes color across the WHOLE lip
+            // (as a sheer/tinted-balm finish should), just always capped low.
+            lipAlpha = smoothstep(0.05, 0.5, lipMask) * 0.35;
         } else if (uLipstickFinish == 4) { // Shimmer: same base coverage as satin, sparkle added at composite
             lipAlpha = smoothstep(0.10, 0.35, lipMask);
         } else { // Matte (0, default): hard edge, near-opaque, no highlight
@@ -462,17 +475,36 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             vec3 lipMultiply = currentSkin * tintedLipstickColor;
             currentSkin = mix(currentSkin, lipMultiply, lipAlpha * uLipstickColor.a);
 
-            // Cheap "highlight ridge" proxy: peaks at lipMask==0.5 (roughly the most
-            // protruding/central part of the lip surface between outer and inner edge),
-            // without needing real per-pixel normals/lighting — reuses the mask value we
-            // already have instead of adding new geometry data.
-            if (uLipstickFinish == 1) { // Satin: subtle, wide sheen
-                float lipRidge = clamp(1.0 - abs(lipMask - 0.5) * 2.0, 0.0, 1.0);
-                currentSkin += vec3(lipRidge * 0.2 * uLipstickGlossiness * lipAlpha);
-            } else if (uLipstickFinish == 2) { // Glossy: tight, bright specular
-                float lipRidge = clamp(1.0 - abs(lipMask - 0.5) * 2.0, 0.0, 1.0);
-                lipRidge = lipRidge * lipRidge * lipRidge;
-                currentSkin += vec3(lipRidge * 0.7 * uLipstickGlossiness * lipAlpha);
+            // Elliptical highlight, localized (not a proxy derived from lipMask alone).
+            // TAMO research: real AR beauty apps (Snap's Makeup Template, ModiFace-family
+            // patents) position gloss shine as a pre-authored, spatially-localized spot —
+            // never purely from a 1D "distance across the lip band" value. An earlier
+            // version drove the highlight only from lipMask (peaking at lipMask==0.5):
+            // since that value doesn't vary along the mouth's horizontal width, the
+            // "peak" formed a bright line running the lip's ENTIRE length instead of a
+            // localized shine (confirmed on-device: "seperti garis ditengah lipstick").
+            // Fixed by baking two more mask channels in PASS 1c — lipU (position along
+            // the mouth's width) and lipLowerWeight (0 upper / 1 lower lip) — so the
+            // highlight can be centered at one (u, mask) point with a real 2D radius,
+            // gated to the lower lip where a real specular highlight usually sits.
+            if (uLipstickFinish == 1) { // Satin: wide, dim, soft-edged sheen
+                vec2 d = vec2(lipU - 0.5, lipMask - 0.7) / vec2(0.32, 0.35);
+                float highlight = pow(clamp(1.0 - dot(d, d), 0.0, 1.0), 1.5) * lipLowerWeight;
+                currentSkin += vec3(highlight * 0.35 * uLipstickGlossiness * lipAlpha);
+                // Secondary highlight: smaller, dimmer, near the cupid's bow (upper lip
+                // center, close to the outer/vermilion edge rather than deep inside) —
+                // reference photos show a smaller catchlight there alongside the main
+                // lower-lip one, not just a single spot.
+                vec2 dCupid = vec2(lipU - 0.5, lipMask - 0.3) / vec2(0.12, 0.15);
+                float cupidHighlight = pow(clamp(1.0 - dot(dCupid, dCupid), 0.0, 1.0), 2.0) * (1.0 - lipLowerWeight);
+                currentSkin += vec3(cupidHighlight * 0.15 * uLipstickGlossiness * lipAlpha);
+            } else if (uLipstickFinish == 2) { // Glossy: tight, bright, sharp-edged specular
+                vec2 d = vec2(lipU - 0.5, lipMask - 0.75) / vec2(0.18, 0.22);
+                float highlight = pow(clamp(1.0 - dot(d, d), 0.0, 1.0), 3.0) * lipLowerWeight;
+                currentSkin += vec3(highlight * 0.7 * uLipstickGlossiness * lipAlpha);
+                vec2 dCupid = vec2(lipU - 0.5, lipMask - 0.3) / vec2(0.10, 0.12);
+                float cupidHighlight = pow(clamp(1.0 - dot(dCupid, dCupid), 0.0, 1.0), 3.0) * (1.0 - lipLowerWeight);
+                currentSkin += vec3(cupidHighlight * 0.35 * uLipstickGlossiness * lipAlpha);
             } else if (uLipstickFinish == 4) { // Shimmer: sparse bright sparkle points, not one coherent highlight
                 float sparkleNoise = fract(sin(dot(vTexCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
                 float sparkle = step(0.9, sparkleNoise);
@@ -1246,6 +1278,16 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
 
                 static LipVec3 lipSubPos[8 * PTS_PER_CONTOUR];
                 static float lipSubAlpha[8 * PTS_PER_CONTOUR];
+                // Baked alongside lipSubAlpha (same static/lifetime pattern), for the
+                // glossy/satin highlight (see below): lipSubU is this vertex's position
+                // along the mouth's horizontal width (0=one corner, 1=the other — cheap,
+                // since the subdivided contours are already built corner-to-corner in
+                // index order, so u is just i normalized, no extra distance math needed).
+                // lipSubLowerWeight is 0 for upper-lip vertices, 1 for lower-lip vertices
+                // — gates the highlight to the lower lip (where real specular highlights
+                // usually sit), which the mesh topology already knows per contour.
+                static float lipSubU[8 * PTS_PER_CONTOUR];
+                static float lipSubLowerWeight[8 * PTS_PER_CONTOUR];
                 int base = 0;
                 int upperOuterBase, upperInnerBase, lowerOuterBase, lowerInnerBase;
 
@@ -1436,6 +1478,21 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
                     expandOutward(lowerOuterBase, lowerInnerBase, expandedLowerOuterBase);
                 }
 
+                // Fill lipSubU/lipSubLowerWeight for every contour built above — u only
+                // depends on the local index i (same formula regardless of which contour),
+                // so one pass over all 8 bases covers everything.
+                {
+                    int allBases[8] = { upperOuterBase, upperInnerBase, lowerOuterBase, lowerInnerBase,
+                                         seamUpperBase, seamLowerBase, expandedUpperOuterBase, expandedLowerOuterBase };
+                    float lowerWeights[8] = { 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f };
+                    for (int b = 0; b < 8; b++) {
+                        for (int i = 0; i < PTS_PER_CONTOUR; i++) {
+                            lipSubU[allBases[b] + i] = (float)i / (float)(PTS_PER_CONTOUR - 1);
+                            lipSubLowerWeight[allBases[b] + i] = lowerWeights[b];
+                        }
+                    }
+                }
+
                 // Quad-strip triangulation across the subdivided (dense) contours —
                 // same pattern as before, just over PTS_PER_CONTOUR-1 segments instead
                 // of 10, and using LOCAL indices into lipSubPos/lipSubAlpha rather than
@@ -1460,7 +1517,6 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
 
                 glVertexAttribPointer(gCtx.mkPositionHandle, 3, GL_FLOAT, GL_FALSE, sizeof(LipVec3), lipSubPos);
                 glEnableVertexAttribArray(gCtx.mkPositionHandle);
-                glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, lipSubAlpha);
                 glEnableVertexAttribArray(gCtx.mkAlphaHandle);
                 // GL_CULL_FACE is still enabled from PASS 1 (glCullFace(GL_BACK),
                 // glFrontFace(GL_CW), only disabled later at the end of this whole
@@ -1470,7 +1526,28 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
                 // with the previous (non-subdivided) version: with culling on, upper
                 // lip triangles were silently discarded entirely.
                 glDisable(GL_CULL_FACE);
+
+                // Three passes into the same RGBA FBO, gated by glColorMask (same
+                // multi-channel-bake technique already used for contour/blush/highlight
+                // sharing maskFbo) — R=coverage alpha (existing), G=horizontal position
+                // along the mouth (for the highlight's position), B=lower-lip weight (for
+                // gating the highlight to the lower lip). One geometry, one shader
+                // (makeupWeightProgram just outputs whatever's bound to aAlpha into all 4
+                // channels; colorMask picks which channel actually lands), three
+                // attribute rebinds + draws.
+                glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, lipSubAlpha);
+                glColorMask(GL_TRUE, GL_FALSE, GL_FALSE, GL_FALSE);
                 glDrawElements(GL_TRIANGLES, lipIdx, GL_UNSIGNED_SHORT, lipTriangleIndices);
+
+                glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, lipSubU);
+                glColorMask(GL_FALSE, GL_TRUE, GL_FALSE, GL_FALSE);
+                glDrawElements(GL_TRIANGLES, lipIdx, GL_UNSIGNED_SHORT, lipTriangleIndices);
+
+                glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, lipSubLowerWeight);
+                glColorMask(GL_FALSE, GL_FALSE, GL_TRUE, GL_FALSE);
+                glDrawElements(GL_TRIANGLES, lipIdx, GL_UNSIGNED_SHORT, lipTriangleIndices);
+
+                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
             }
             glDisableVertexAttribArray(gCtx.mkPositionHandle);
             glDisableVertexAttribArray(gCtx.mkAlphaHandle);

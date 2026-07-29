@@ -23,6 +23,7 @@ function hexToRGBA(hex: string, alpha: number): [number, number, number, number]
 }
 
 const foundationTypes = ['matte', 'dewy', 'sheer', 'satin', 'luminous'] as const;
+const lipstickFinishes = ['matte', 'satin', 'glossy', 'sheer', 'shimmer'] as const;
 
 // Draggable before/after divider. Renders FIRST inside uiOverlay (before topBar/bottom
 // dock) so its full-width drag layer sits BELOW them in touch z-order — later siblings
@@ -117,7 +118,7 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
   const arViewRef = useRef<any>(null);
   const [hasPermission, setHasPermission] = useState(false);
   const [showMesh, setShowMesh] = useState(true);
-  const [activeCategory, setActiveCategory] = useState<'foundation' | 'concealer' | 'contour' | 'blush' | null>(null);
+  const [activeCategory, setActiveCategory] = useState<'foundation' | 'concealer' | 'contour' | 'blush' | 'lipstick' | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [scanTriggerId, setScanTriggerId] = useState(0);
   const [showDiagnosticsOverlay, setShowDiagnosticsOverlay] = useState(false);
@@ -133,7 +134,7 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
     lipstickColor, lipstickOpacity, lipstickFinish, lipstickGlossiness, blushColor, blushOpacity, blushStyle,
     contourColor, contourIntensity, contourStyle,
     eyeshadowColor, eyeshadowOpacity,
-    setFoundation, setConcealer, setBlush, setContour,
+    setFoundation, setConcealer, setBlush, setContour, setLipstick,
   } = state;
 
   useEffect(() => {
@@ -208,7 +209,7 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
       concealerStyle === 'corrector_green' ? 2 :
         concealerStyle === 'corrector_peach' ? 3 : 0;
 
-  const toggleCategory = (cat: 'foundation' | 'concealer' | 'contour' | 'blush') => {
+  const toggleCategory = (cat: 'foundation' | 'concealer' | 'contour' | 'blush' | 'lipstick') => {
     setActiveCategory(activeCategory === cat ? null : cat);
   };
 
@@ -374,6 +375,21 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
                     </ScrollView>
                   </>
                 )}
+
+                {activeCategory === 'lipstick' && (
+                  <>
+                    <ColorPicker label="SHADE" colors={['#00000000', '#C0392B', '#B5344C', '#E8607A', '#8E3B46', '#D97B93', '#A64B2A']} selectedColor={lipstickColor} onSelect={(c: string) => { setLipstick({ lipstickColor: c }); if (c !== '#00000000' && lipstickOpacity === 0) setLipstick({ lipstickOpacity: 1.0 }); }} />
+                    <GlassSlider label="Opacity" min={0} max={1} value={lipstickOpacity} onChange={(v: any) => setLipstick({ lipstickOpacity: v })} />
+                    <GlassSlider label="Shine" min={0} max={1} value={lipstickGlossiness} onChange={(v: any) => setLipstick({ lipstickGlossiness: v })} />
+
+                    <Text style={styles.pickerLabel}>FINISH</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.swatchScroll}>
+                      {lipstickFinishes.map((finish) => (
+                        <StylePill key={finish} title={finish.charAt(0).toUpperCase() + finish.slice(1)} selected={lipstickFinish === finish} onPress={() => setLipstick({ lipstickFinish: finish })} />
+                      ))}
+                    </ScrollView>
+                  </>
+                )}
               </ScrollView>
             </View>
           </View>
@@ -396,6 +412,10 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
 
             <TouchableOpacity style={[styles.dockIcon, activeCategory === 'blush' && styles.dockIconActive]} onPress={() => toggleCategory('blush')}>
               <Text style={[styles.dockGlyph, activeCategory === 'blush' && styles.dockGlyphActive]}>●</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={[styles.dockIcon, activeCategory === 'lipstick' && styles.dockIconActive]} onPress={() => toggleCategory('lipstick')}>
+              <Text style={[styles.dockGlyph, activeCategory === 'lipstick' && styles.dockGlyphActive]}>💋</Text>
             </TouchableOpacity>
           </View>
         </View>
