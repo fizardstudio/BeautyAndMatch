@@ -80,12 +80,15 @@ const initialMakeup = {
   // TESTING (temporary): visible by default (every other layer starts at
   // '#00000000'/0.0, off) so the new lipstick finish picker in TryOnScreen has
   // something on-screen to compare finishes against without an extra tap first.
-  // Switch back to '#00000000'/0.0 once satin/glossy/sheer/shimmer are all
-  // confirmed against real footage via the UI picker.
+  // Switch back to '#00000000'/0.0 once this is a finished, user-facing feature.
+  // Finish defaults to 'matte' — the only finish confirmed to look fully
+  // realistic on-device; shimmer/glitter in particular is a known open item
+  // (see FIZGRAVITY_ROADMAP.md) that never reached a convincing result despite
+  // many iterations, so it shouldn't be what a fresh install shows by default.
   lipstickColor: '#C0392B',
   lipstickGlossiness: 0.5,
   lipstickOpacity: 1.0,
-  lipstickFinish: 'satin',
+  lipstickFinish: 'matte',
 
   eyeshadowColor: '#00000000',
   eyeshadowOpacity: 0.0,

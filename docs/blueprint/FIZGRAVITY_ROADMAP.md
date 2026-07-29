@@ -312,15 +312,21 @@ menambah variasi gaya Blush/Highlighter/Eyeshadow yang sifatnya "nice to have", 
 - **Lipstick**: preservasi kerutan bibir (`lipDetailRatio`), aturan overline (haram overline sudut mulut),
   ombré Korean vs Western — dictionary §10.
 - **Foundation**: CIELAB/ITA color matching (§1D) + kompensasi ashiness kulit gelap (§1C).
-- **Kualitas batas bibir** (2026-07-29): malam ini fixed bug besar (lipstick bocor jauh ke kulit
-  kumis/dagu — root cause: bake mask pakai triangulasi wajah PENUH, bukan triangulasi khusus bibir yang
-  sudah ada tapi belum kepakai di `Fizgravity-AR-Engine/src/makeup_triangulator.rs`). Sudah di-port ke
-  C++ (`get_upper_lip_triangles`/`get_lower_lip_triangles`, 11 titik kontur luar+dalam per sisi bibir) —
-  bocor udah nggak ada, tapi tepinya masih kelihatan patah-patah/segi (cuma 11 titik, garis lurus antar
-  titik, bukan kurva halus). User minta riset TAMO biar robust ke macam-macam bentuk bibir, bukan cuma
-  dituning di 1 wajah — **riset sedang jalan** (cek MediaPipe refine_landmarks equivalent, teknik smooth-
-  curve macam Catmull-Rom/Bezier di titik kontur yang ada, atau pendekatan segmentasi kayak hair
-  segmenter). Hasil riset & rekomendasi belum masuk sesi ini — lanjutkan sebelum retuning lipstick.
+- **Kualitas batas bibir (✅ SELESAI 2026-07-29)**: bocor ke kulit kumis/dagu fixed (triangulasi khusus
+  bibir, bukan mesh wajah penuh), tepi patah-segi fixed (Catmull-Rom spline, 11 titik → ~51 titik per
+  kontur), celah/mangap seam fixed (seam band pakai SATU sinyal global "seberapa terbuka mulut" dari
+  titik tengah, bukan per-titik independen — versi per-titik bikin animasi nutup terasa "menyapu dari
+  samping" alih-alih atas-ketemu-bawah), sudut mulut dikunci sempit (4% dari lebar mulut) biar gak ikut
+  animasi buka-tutup tapi tetap bentuk V natural. Margin outer ~6.75% lebar mulut buat bibir tebal/lipatan.
+- **Sistem lipstick finish (✅ SELESAI 2026-07-29)**: matte/satin/glossy/sheer/shimmer, masing-masing
+  kurva alpha coverage sendiri (bukan cuma beda kilau) + UI picker penuh (shade/opacity/shine/finish) di
+  TryOnScreen. Matte/satin/glossy/sheer confirmed realistis di device.
+- **Shimmer/glitter — OPEN ITEM, di-skip untuk sekarang**: 7+ ronde percobaan (noise prosedural berbagai
+  variasi, lalu tekstur glitter ter-generate via `generate_glitter_texture.py` + mipmap + intensity cap)
+  masih belum meyakinkan secara visual ("gak realistic", kata user). Kemungkinan perlu riset lebih dalam
+  soal bagaimana app AR profesional benar-benar merender glitter (bukan cuma placeholder texture kita),
+  atau terima keterbatasan shader real-time untuk efek ini. Default finish di `makeupStore.ts` sengaja
+  di-set ke `'matte'` (bukan `'shimmer'`) sampai ini beres.
 
 ## FASE 5: Softlens + Perluas Katalog Layer Lain
 
