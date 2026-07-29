@@ -506,33 +506,37 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
                 float cupidHighlight = pow(clamp(1.0 - dot(dCupid, dCupid), 0.0, 1.0), 3.0) * (1.0 - lipLowerWeight);
                 currentSkin += vec3(cupidHighlight * 0.35 * uLipstickGlossiness * lipAlpha);
             } else if (uLipstickFinish == 4) { // Shimmer: sparse bright sparkle points, not one coherent highlight
-                // Was driven by vTexCoord (full CAMERA-FRAME screen space) — since the
-                // lip only covers a small slice of that range, the noise pattern barely
-                // varied across the whole lip, so it rendered as either nothing or one
-                // flat patch depending on face/camera position (confirmed on-device:
-                // "shimmer kayanya sama aja dengan matte", no visible sparkle at all).
-                // Using lipU/lipMask instead — both span a full, predictable 0..1 range
-                // across the ENTIRE lip regardless of screen resolution, face distance,
-                // or camera zoom — and flooring into a grid of cells (not raw per-pixel
-                // noise) guarantees a consistent, clearly visible number of sparkle
-                // points every time, moving correctly with the lips since it's derived
-                // from lip-local UVs, not screen position.
-                // sin()-based hashes (fract(sin(dot(...))*large)) are a known trap on
-                // mobile `mediump` precision: once the dot product's magnitude climbs
-                // into the hundreds/thousands (easily reached here — cell coordinates up
-                // to ~40 times coefficients like 78.233), mediump sin() on GPUs like
-                // Adreno loses range-reduction accuracy and can degrade toward a
-                // near-constant output — which is almost certainly why NO sparkle was
-                // visible at all (confirmed on-device, still true after switching to
-                // lip-local cell coordinates). Replaced with a multiply/fract-only hash
-                // (no trig call at all), which stays precision-safe in mediump regardless
-                // of input magnitude.
-                vec2 sparkleCell = floor(vec2(lipU * 40.0, lipMask * 20.0));
-                vec2 sparkleHashV = fract(sparkleCell * vec2(0.1031, 0.1030));
-                sparkleHashV += dot(sparkleHashV, sparkleHashV.yx + 33.33);
-                float sparkleNoise = fract((sparkleHashV.x + sparkleHashV.y) * sparkleHashV.x);
-                float sparkle = step(0.85, sparkleNoise);
-                currentSkin += vec3(sparkle * 0.6 * uLipstickGlossiness * lipAlpha);
+                // Went through several rounds of procedural noise (see git history)
+                // trying to get this right: screen-space noise (invisible — lip covers
+                // too little of the frame), a sin()-based hash (degrades in mobile
+                // mediump precision — still invisible), a weak vec2 hash mix (banded
+                // into horizontal stripes), a per-cell hash+round-dot version (still
+                // elongated, and biased to one side — the cheap integer-cell hash just
+                // doesn't have good enough distribution at this grid size on this
+                // hardware). Switched to a small FIXED constellation of sparkle points
+                // instead of procedural randomness — no hash, so no hash bugs.
+                //
+                // Each dot needs an ANISOTROPIC radius, not a uniform one: the lip's
+                // outer->inner "band" (the mask axis) is much SHORTER on screen than its
+                // corner-to-corner width (the u axis), so a dot with equal radius in
+                // normalized (u, mask) units renders far wider than tall on screen. First
+                // attempt scaled the mask axis UP (÷ a small number) before measuring
+                // distance, which is backwards — that shrinks the effective radius in the
+                // shorter axis even further, producing exactly the long thin horizontal
+                // streaks reported ("garis garis horizontal tipis panjang"). Correct
+                // direction: give the mask axis a LARGER radius (dividing by a bigger
+                // number) to compensate for its physically compressed scale.
+                vec2 lipUV = vec2(lipU, lipMask);
+                vec2 dotRadius = vec2(0.05, 0.25); // (u radius, mask radius) — mask >> u on purpose
+                float sparkle = 0.0;
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.15, 0.35)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.30, 0.75)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.45, 0.40)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.55, 0.80)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.70, 0.35)) / dotRadius));
+                sparkle += smoothstep(1.0, 0.0, length((lipUV - vec2(0.85, 0.70)) / dotRadius));
+                sparkle = clamp(sparkle, 0.0, 1.0);
+                currentSkin += vec3(sparkle * 0.7 * uLipstickGlossiness * lipAlpha);
             }
 
             // Before/after split-screen comparison: uShowMakeup is a horizontal divider
