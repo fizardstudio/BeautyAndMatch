@@ -545,8 +545,15 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
                 // (mix factor near 0) leave the base lipstick color untouched — same
                 // "sits on top as an accent" balance as before, just with real contrast
                 // at the peaks instead of a flat brightness bump everywhere.
+                // Capped at 0.5 (not 0.85): at max SHINE + max OPACITY sliders, the
+                // brightest fleck cores were mixing to ~85% white, reading as fully
+                // blocking the base lipstick color there rather than sitting on top of
+                // it as an accent (user: "opacity nya agar warna dasar lipstick tidak
+                // benar benar terhalang"). This cap holds even at the sliders' maximum,
+                // not just at their default — the sliders still control overall sparkle
+                // strength below that ceiling.
                 float sparkleIntensity = sparkle * uLipstickGlossiness * lipAlpha;
-                currentSkin = mix(currentSkin, vec3(1.0), sparkleIntensity * 0.85);
+                currentSkin = mix(currentSkin, vec3(1.0), sparkleIntensity * 0.5);
             }
 
             // Before/after split-screen comparison: uShowMakeup is a horizontal divider
@@ -1871,7 +1878,16 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeLoadGlitterTexture(JNIEnv* env,
     // instead of a manual fract() in the shader.
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    // Mipmapped minification, not plain GL_LINEAR: at this texture's tile scale (see
+    // uLipstickFinish==4 in the shader), each on-screen tile minifies the 256x256
+    // source significantly — GL_LINEAR alone only samples a 2x2 texel neighborhood, so
+    // any minification beyond ~2x aliases into visible shimmer/noise. That's almost
+    // certainly the real cause of "masih terlihat banyak yang kasar" surviving even
+    // after fixing the source texture's own edge anti-aliasing (supersampling fixed
+    // the texture's OWN edges; this fixes how the GPU DOWNSAMPLES those edges once
+    // minified on screen — two different stages of the same "smooth edges" goal).
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 }
 
