@@ -275,15 +275,18 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
         // non-neutral color like this app's user-picked foundation to sit underneath.
         float faceMask = mask.r;
 
-        // lipRawMask is baked by linearly interpolating vertex alpha (1.0 at LIP_INDICES,
-        // 0.0 at every other mesh vertex) across whatever triangles border the lip
-        // landmarks — the transition width is incidental to local mesh triangle size, not
-        // a deliberately tuned feather. Confirmed empirically: a saturated test lipstick
-        // color visibly bled onto the mustache/chin/cheek skin, well past the vermilion
-        // border. Sharpen at the natural ~50% crossover so the effective boundary tracks
-        // the actual lip edge instead of that incidental triangle-size width.
-        float lipRawMask = texture2D(sLipMaskTex, vTexCoord).r;
-        float lipMask = smoothstep(0.4, 0.6, lipRawMask);
+        // lipRawMask now comes from a dedicated, tightly-bounded lip-only triangulation
+        // (Catmull-Rom-smoothed outer/inner contours — see PASS 1c) with its own
+        // deliberately-authored feather (0.15 at the outer/vermilion edge, 1.0 at the
+        // inner edge), not the old full-face-mesh bake whose transition width was
+        // incidental to triangle size. Use it directly — an earlier smoothstep(0.4,0.6)
+        // sharpening pass here was a workaround for THAT old wide/incidental bleed, but
+        // now that the geometry itself is precise, that same threshold does the wrong
+        // thing: the outer contour's 0.15 baseline never clears 0.4, so it was clipping
+        // real coverage off the outer edge instead of fixing a bleed that no longer
+        // exists (confirmed on-device: rendered lipstick fell visibly short of the true
+        // vermilion border after the geometry fix, until this was removed).
+        float lipMask = texture2D(sLipMaskTex, vTexCoord).r;
 
         float foundationMask = faceMask * (1.0 - lipMask);
         float contourAlpha   = mask.g * faceMask;
@@ -751,6 +754,80 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeResize(JNIEnv* env, jclass claz
     }
 }
 
+// --- Centripetal Catmull-Rom spline smoothing for sparse lip contours ---
+// Research (TAMO, 2026-07-29): the lip contour arrays (11 points per half) connected by
+// straight triangle edges render as a visibly faceted/angular polygon, not a smooth
+// anatomical curve. Centripetal Catmull-Rom is the recommended fix: it INTERPOLATES
+// (passes exactly through every original point, preserving the cupid's-bow concave dip,
+// unlike approximating techniques like Chaikin's algorithm which would round it away),
+// and "centripetal" parametrization (knot spacing by sqrt(distance) rather than uniform
+// spacing) avoids loop/cusp artifacts from the uneven spacing between real lip landmarks.
+// This is pure geometry computed from whatever landmarks MediaPipe returns for the
+// current face, so it adapts to each user's actual lip shape rather than being a value
+// tuned against one tester's face.
+struct LipVec3 { float x, y, z; };
+
+static LipVec3 catmullRomPoint(const LipVec3& p0, const LipVec3& p1, const LipVec3& p2, const LipVec3& p3, float t) {
+    auto dist = [](const LipVec3& a, const LipVec3& b) {
+        float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+        return sqrtf(dx * dx + dy * dy + dz * dz);
+    };
+    auto lerp = [](const LipVec3& a, const LipVec3& b, float alpha) {
+        return LipVec3{ a.x + (b.x - a.x) * alpha, a.y + (b.y - a.y) * alpha, a.z + (b.z - a.z) * alpha };
+    };
+
+    float t0 = 0.0f;
+    float t1 = t0 + sqrtf(dist(p0, p1));
+    float t2 = t1 + sqrtf(dist(p1, p2));
+    float t3 = t2 + sqrtf(dist(p2, p3));
+    // Guard degenerate (near-coincident) control points rather than divide by ~0.
+    if (t1 - t0 < 1e-5f) t1 = t0 + 1e-5f;
+    if (t2 - t1 < 1e-5f) t2 = t1 + 1e-5f;
+    if (t3 - t2 < 1e-5f) t3 = t2 + 1e-5f;
+
+    float tt = t1 + t * (t2 - t1); // map local [0,1] onto this segment's knot interval
+
+    LipVec3 A1 = lerp(p0, p1, (tt - t0) / (t1 - t0));
+    LipVec3 A2 = lerp(p1, p2, (tt - t1) / (t2 - t1));
+    LipVec3 A3 = lerp(p2, p3, (tt - t2) / (t3 - t2));
+    LipVec3 B1 = lerp(A1, A2, (tt - t0) / (t2 - t0));
+    LipVec3 B2 = lerp(A2, A3, (tt - t1) / (t3 - t1));
+    return lerp(B1, B2, (tt - t1) / (t2 - t1));
+}
+
+// Subdivides an N-point control polygon into a smooth curve. Segment endpoints use
+// clamped phantom points (duplicate the first/last control point) so the curve doesn't
+// extrapolate past the real endpoints — critical here since the first/last point of
+// every lip contour is a shared mouth-corner landmark that other contours also anchor to.
+// Writes (numControlPoints-1)*subdivisions + 1 points to outPositions/outAlphas and
+// returns that count. Caller must size the output buffers accordingly.
+static int subdivideLipContour(
+    const LipVec3* controlPoints, const float* controlAlphas, int numControlPoints,
+    int subdivisions, LipVec3* outPositions, float* outAlphas)
+{
+    int outCount = 0;
+    int numSegments = numControlPoints - 1;
+    for (int i = 0; i < numSegments; i++) {
+        LipVec3 p0 = (i == 0) ? controlPoints[0] : controlPoints[i - 1];
+        LipVec3 p1 = controlPoints[i];
+        LipVec3 p2 = controlPoints[i + 1];
+        LipVec3 p3 = (i == numSegments - 1) ? controlPoints[numControlPoints - 1] : controlPoints[i + 2];
+        float a1 = controlAlphas[i];
+        float a2 = controlAlphas[i + 1];
+
+        // Include t=1.0 only on the final segment, so shared knot points between
+        // segments aren't emitted twice.
+        int steps = (i == numSegments - 1) ? (subdivisions + 1) : subdivisions;
+        for (int s = 0; s < steps; s++) {
+            float t = (float)s / (float)subdivisions;
+            outPositions[outCount] = catmullRomPoint(p0, p1, p2, p3, t);
+            outAlphas[outCount] = a1 + (a2 - a1) * t; // plain linear feather, no need for spline smoothing here
+            outCount++;
+        }
+    }
+    return outCount;
+}
+
 JNIEXPORT void JNICALL
 Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
     JNIEnv* env, jclass clazz, jint textureId, jobject buffer, jint width, jint height, jint rowStride, jfloatArray landmarks, jboolean hasNewImage)
@@ -821,6 +898,22 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
     glBindFramebuffer(GL_FRAMEBUFFER, gCtx.maskFbo.fbo);
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // lipMaskFbo/eyeMaskFbo/concealerMaskFbo are only WRITTEN inside the
+    // `landmarks != nullptr` block below (their bake needs real geometry), but
+    // must be CLEARED unconditionally every frame regardless of face detection —
+    // otherwise, the moment the face leaves frame, this whole block is skipped
+    // and these dedicated FBOs simply keep whatever they last baked (e.g.
+    // lipstick staying visibly "stuck" onscreen with no face in view at all).
+    // maskFbo above already gets cleared unconditionally; these three need the
+    // same treatment since PASS 1c/1d/1e write to separate dedicated targets.
+    glBindFramebuffer(GL_FRAMEBUFFER, gCtx.lipMaskFbo.fbo);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBindFramebuffer(GL_FRAMEBUFFER, gCtx.eyeMaskFbo.fbo);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBindFramebuffer(GL_FRAMEBUFFER, gCtx.concealerMaskFbo.fbo);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBindFramebuffer(GL_FRAMEBUFFER, gCtx.maskFbo.fbo);
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
@@ -1071,60 +1164,115 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
             glUseProgram(gCtx.makeupWeightProgram);
             glUniform2f(gCtx.mkScaleHandle, gCtx.scaleX, gCtx.scaleY);
             glUniform2f(gCtx.mkOffsetHandle, gCtx.offsetX, gCtx.offsetY);
-            glVertexAttribPointer(gCtx.mkPositionHandle, 3, GL_FLOAT, GL_FALSE, 0, data);
-            glEnableVertexAttribArray(gCtx.mkPositionHandle);
             {
-                // Feathering weights (ported from calculate_lip_feathering): outer
-                // contour fades to 0.15 (not a hard 0 — a gentle feather against the
-                // now-tightly-bounded triangulation below), inner contour stays full
-                // 1.0, MediaPipe's secondary mid-lip landmarks get an intermediate 0.65
-                // for a smoother gradient across the band. Only vertices actually
-                // referenced by lipTriangleIndices below matter — the rest of this
-                // array is never sampled since nothing else gets drawn in this pass.
-                static float lipVertexAlpha[468];
-                for (int i = 0; i < 11; i++) {
-                    lipVertexAlpha[UPPER_LIP_OUTER[i]] = 0.15f;
-                    lipVertexAlpha[LOWER_LIP_OUTER[i]] = 0.15f;
-                    lipVertexAlpha[UPPER_LIP_INNER[i]] = 1.0f;
-                    lipVertexAlpha[LOWER_LIP_INNER[i]] = 1.0f;
-                }
-                static const unsigned short midLipIndices[] = {37, 0, 267, 81, 82, 13, 312, 311, 14, 87, 178, 317};
-                for (int i = 0; i < 12; i++) lipVertexAlpha[midLipIndices[i]] = 0.65f;
+                // Smooth the 4 sparse (11-point) lip contours into dense curves via
+                // centripetal Catmull-Rom (see subdivideLipContour above for the
+                // technique/why) before triangulating, instead of connecting the
+                // original 11 points with straight edges (which rendered as a visibly
+                // faceted/angular polygon, confirmed on-device). Subdivided points are
+                // NEW positions that don't correspond to any MediaPipe landmark index,
+                // so this pass builds and binds its OWN local position/alpha/index
+                // buffers instead of indexing into the shared per-frame `data` array
+                // like every other mask-baking pass in this function does.
+                const int SUBDIV = 5; // ~5 segments per original edge; raise if still visibly faceted
+                const int PTS_PER_CONTOUR = 10 * SUBDIV + 1; // (11 control points - 1 segments) * SUBDIV + 1
 
-                // Dedicated lip-only triangle list: outer-to-inner contour quad-strip
-                // for upper and lower lip (see FizgravityMakeupIndices.h for why this
-                // replaces drawing the full-face MESH_INDICES here) — tightly bounded,
-                // can never reach a vertex outside the lip band.
-                static unsigned short lipTriangleIndices[120];
+                LipVec3 ctrlPos[11];
+                float ctrlAlphaOuter[11], ctrlAlphaInner[11];
+                for (int i = 0; i < 11; i++) { ctrlAlphaOuter[i] = 0.15f; ctrlAlphaInner[i] = 1.0f; }
+
+                static LipVec3 lipSubPos[6 * PTS_PER_CONTOUR];
+                static float lipSubAlpha[6 * PTS_PER_CONTOUR];
+                int base = 0;
+                int upperOuterBase, upperInnerBase, lowerOuterBase, lowerInnerBase;
+
+                auto extractAndSubdivide = [&](const unsigned short* indices, const float* alphas, int& outBase) {
+                    for (int i = 0; i < 11; i++) {
+                        ctrlPos[i] = LipVec3{ data[indices[i] * 3 + 0], data[indices[i] * 3 + 1], data[indices[i] * 3 + 2] };
+                    }
+                    outBase = base;
+                    base += subdivideLipContour(ctrlPos, alphas, 11, SUBDIV, &lipSubPos[outBase], &lipSubAlpha[outBase]);
+                };
+                extractAndSubdivide(UPPER_LIP_OUTER, ctrlAlphaOuter, upperOuterBase);
+                extractAndSubdivide(UPPER_LIP_INNER, ctrlAlphaInner, upperInnerBase);
+                extractAndSubdivide(LOWER_LIP_OUTER, ctrlAlphaOuter, lowerOuterBase);
+                extractAndSubdivide(LOWER_LIP_INNER, ctrlAlphaInner, lowerInnerBase);
+
+                // Reverted (see git history for the two attempts that regressed this):
+                // a fixed-distance inward push at full alpha overshot visibly on close
+                // (the lower inner lip "crashed" upward past the upper lip), and a
+                // centroid/outer-inner-derived outer halo made the outer boundary itself
+                // read as imprecise. Back to the last confirmed-stable mechanism: a
+                // SEPARATE duplicate of the inner contours with DYNAMIC alpha — full when
+                // the mouth is closed (upper/lower inner contours nearly coincide),
+                // fading to 0 as the mouth opens (real per-frame distance between them).
+                // Reusing upperInnerBase/lowerInnerBase directly would have forced those
+                // strips' own alpha to change too, since they're driven by the same
+                // vertex data. Distance is normalized by mouth corner-to-corner width so
+                // the threshold is scale-invariant (same behavior close or far from the
+                // camera). The outer boundary is deliberately left untouched here (no
+                // halo) — user confirmed it was already precise before the halo attempts;
+                // extending it further for thick/folded lips needs its own separate,
+                // carefully-verified pass rather than stacking onto this fix.
+                int seamUpperBase = base;
+                int seamLowerBase = base + PTS_PER_CONTOUR;
+                base += 2 * PTS_PER_CONTOUR;
+                {
+                    LipVec3 cornerL = lipSubPos[upperOuterBase];
+                    LipVec3 cornerR = lipSubPos[upperOuterBase + PTS_PER_CONTOUR - 1];
+                    float mdx = cornerR.x - cornerL.x, mdy = cornerR.y - cornerL.y, mdz = cornerR.z - cornerL.z;
+                    float mouthWidth = sqrtf(mdx * mdx + mdy * mdy + mdz * mdz);
+                    if (mouthWidth < 1e-5f) mouthWidth = 1e-5f;
+
+                    for (int i = 0; i < PTS_PER_CONTOUR; i++) {
+                        LipVec3 pu = lipSubPos[upperInnerBase + i];
+                        LipVec3 pl = lipSubPos[lowerInnerBase + i];
+                        float dx = pu.x - pl.x, dy = pu.y - pl.y, dz = pu.z - pl.z;
+                        float relGap = sqrtf(dx * dx + dy * dy + dz * dz) / mouthWidth;
+                        // Below ~5% of mouth width: treat as closed (full seam alpha).
+                        // Above ~35%: clearly open, seam alpha fades to 0 so the real
+                        // camera cavity/teeth show through via the raw-passthrough path.
+                        float t = (relGap - 0.05f) / (0.35f - 0.05f);
+                        t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+                        float seamAlpha = 1.0f - (t * t * (3.0f - 2.0f * t)); // smoothstep, inverted
+                        lipSubPos[seamUpperBase + i] = pu;
+                        lipSubPos[seamLowerBase + i] = pl;
+                        lipSubAlpha[seamUpperBase + i] = seamAlpha;
+                        lipSubAlpha[seamLowerBase + i] = seamAlpha;
+                    }
+                }
+
+                // Quad-strip triangulation across the subdivided (dense) contours —
+                // same pattern as before, just over PTS_PER_CONTOUR-1 segments instead
+                // of 10, and using LOCAL indices into lipSubPos/lipSubAlpha rather than
+                // MediaPipe landmark indices.
+                static unsigned short lipTriangleIndices[6 * (10 * 6) * 6]; // generous upper bound
                 int lipIdx = 0;
-                for (int i = 0; i < 10; i++) {
-                    lipTriangleIndices[lipIdx++] = UPPER_LIP_OUTER[i];
-                    lipTriangleIndices[lipIdx++] = UPPER_LIP_OUTER[i + 1];
-                    lipTriangleIndices[lipIdx++] = UPPER_LIP_INNER[i];
-                    lipTriangleIndices[lipIdx++] = UPPER_LIP_INNER[i];
-                    lipTriangleIndices[lipIdx++] = UPPER_LIP_OUTER[i + 1];
-                    lipTriangleIndices[lipIdx++] = UPPER_LIP_INNER[i + 1];
-                }
-                for (int i = 0; i < 10; i++) {
-                    lipTriangleIndices[lipIdx++] = LOWER_LIP_OUTER[i];
-                    lipTriangleIndices[lipIdx++] = LOWER_LIP_OUTER[i + 1];
-                    lipTriangleIndices[lipIdx++] = LOWER_LIP_INNER[i];
-                    lipTriangleIndices[lipIdx++] = LOWER_LIP_INNER[i];
-                    lipTriangleIndices[lipIdx++] = LOWER_LIP_OUTER[i + 1];
-                    lipTriangleIndices[lipIdx++] = LOWER_LIP_INNER[i + 1];
-                }
+                auto addQuadStrip = [&](int outerBase, int innerBase) {
+                    for (int i = 0; i < PTS_PER_CONTOUR - 1; i++) {
+                        lipTriangleIndices[lipIdx++] = (unsigned short)(outerBase + i);
+                        lipTriangleIndices[lipIdx++] = (unsigned short)(outerBase + i + 1);
+                        lipTriangleIndices[lipIdx++] = (unsigned short)(innerBase + i);
+                        lipTriangleIndices[lipIdx++] = (unsigned short)(innerBase + i);
+                        lipTriangleIndices[lipIdx++] = (unsigned short)(outerBase + i + 1);
+                        lipTriangleIndices[lipIdx++] = (unsigned short)(innerBase + i + 1);
+                    }
+                };
+                addQuadStrip(upperOuterBase, upperInnerBase);
+                addQuadStrip(lowerOuterBase, lowerInnerBase);
+                addQuadStrip(seamUpperBase, seamLowerBase);
 
-                glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, lipVertexAlpha);
+                glVertexAttribPointer(gCtx.mkPositionHandle, 3, GL_FLOAT, GL_FALSE, sizeof(LipVec3), lipSubPos);
+                glEnableVertexAttribArray(gCtx.mkPositionHandle);
+                glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, lipSubAlpha);
                 glEnableVertexAttribArray(gCtx.mkAlphaHandle);
                 // GL_CULL_FACE is still enabled from PASS 1 (glCullFace(GL_BACK),
                 // glFrontFace(GL_CW), only disabled later at the end of this whole
                 // baking sequence) — this is a mask-baking pass, not 3D solid geometry,
                 // so winding direction is irrelevant to what we want (rasterize the
-                // alpha data regardless of triangle orientation). The hand-built
-                // upper/lower quad-strips above don't have guaranteed-consistent
-                // winding relative to each other, and confirmed on-device: with culling
-                // on, the upper lip triangles were silently discarded entirely (zero
-                // coverage) while the lower lip rendered fine.
+                // alpha data regardless of triangle orientation). Confirmed on-device
+                // with the previous (non-subdivided) version: with culling on, upper
+                // lip triangles were silently discarded entirely.
                 glDisable(GL_CULL_FACE);
                 glDrawElements(GL_TRIANGLES, lipIdx, GL_UNSIGNED_SHORT, lipTriangleIndices);
             }

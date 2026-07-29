@@ -76,9 +76,11 @@ const initialMakeup = {
   contourIntensity: 0.0,
   contourStyle: 'normal' as const,
 
-  lipstickColor: '#00000000',
+  lipstickColor: '#00FF00', // DIAGNOSTIC (temporary): verify outer edge now reaches the
+                             // true vermilion border after removing the over-aggressive
+                             // smoothstep — revert after checking.
   lipstickGlossiness: 0.5,
-  lipstickOpacity: 0.0,
+  lipstickOpacity: 1.0,
 
   eyeshadowColor: '#00000000',
   eyeshadowOpacity: 0.0,
