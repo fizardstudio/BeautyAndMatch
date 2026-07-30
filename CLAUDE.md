@@ -8,6 +8,23 @@
 - Tooling: Python + OpenCV untuk generate mesh index/UV/header C++
 - Build: Gradle, CMake, Metro, ESLint/Prettier/Jest
 
+## ⚠️ Gotcha Build: Autolinking Android Statis (WAJIB dibaca sebelum nambah native dependency)
+
+`android/settings.gradle` pakai `autolinkLibrariesFromConfigFile(new File(settingsDir, "autolinking.json"))`
+— artinya `android/autolinking.json` adalah file **statis** yang di-copy apa adanya saat build, BUKAN
+auto-regenerate dari `package.json` seperti autolinking default RN. Efeknya: `npm install <native-package>`
+lalu langsung `gradlew installDebug` akan **build sukses** (exit 0) tapi app **crash saat runtime** dengan
+error semacam `Cannot read property 'X' of undefined` — karena modul native barunya gak pernah ke-register
+walau APK berhasil dibuat.
+
+**Setiap kali nambah/hapus native dependency** (apapun yang punya kode native, bukan pure-JS package),
+WAJIB regenerate dulu sebelum rebuild:
+```
+npx @react-native-community/cli config > android/autolinking.json
+```
+Baru setelah itu jalankan `gradlew installDebug`. Lupa langkah ini adalah penyebab bug yang sangat
+membingungkan karena build tool sama sekali tidak memberi warning/error di tahap compile.
+
 ## Pembagian Tugas Agent
 
 Struktur: **Claude (host) = mandor** → orkestrasi, reasoning, planning, review/QC final. Penulisan kode untuk task besar/fitur baru **boleh** didelegasikan ke subagent Haiku 4.5 lewat workflow `feature-research`, tapi hasilnya wajib direview mandor sebelum dianggap selesai. Untuk edit kecil/langsung (satu-dua baris, fix cepat), Claude host tetap boleh edit sendiri tanpa lewat workflow — tidak semua perubahan perlu difull-orchestrate.

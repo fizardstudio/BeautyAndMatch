@@ -15,6 +15,7 @@
     "@shopify/react-native-skia": "^2.9.0",
     "react": "19.2.3",
     "react-native": "0.86.0",
+    "react-native-gesture-handler": "^3.1.0",
     "react-native-reanimated": "^4.5.2",
     "react-native-safe-area-context": "^5.5.2",
     "react-native-vision-camera": "^4.7.3",

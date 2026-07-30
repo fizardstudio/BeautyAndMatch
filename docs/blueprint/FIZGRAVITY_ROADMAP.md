@@ -290,6 +290,31 @@ Sambungkan `faceShape`/`eyeShape`/`noseShape` ke tabel mapping teknik-per-bentuk
 lengkap di dictionary (§3B Contour, §4B Blush, §5D Highlighter, §9B Eyebrows). User tetap bisa override
 manual, tapi default suggestion harus otomatis dari AI, bukan user pilih buta dari pilihan generik.
 
+### 2.1 — Shade Matcher (konsep, riset legal sudah ada — 2026-07-29)
+
+Alur yang disepakati: AR rendering TETAP pakai palette warna kita sendiri (bebas, tidak pernah
+menyentuh data brand sama sekali). Setelah user puas dengan satu look, BARU jalankan reverse
+lookup: hex/LAB warna yang sedang dipakai dicocokkan (nearest-color-match) ke tabel referensi
+shade brand asli, tampil sebagai teks informasional ("warna ini paling dekat ke Brand A Produk X
+Shade Y") — bukan render presisi warna brand di AR.
+
+**Kenapa alur ini dipilih (riset legal, 2 subagent research pass 2026-07-29):**
+- Render AR presisi warna asli brand (co: "lihat MAC NC42 di wajahmu secara fotorealistik") butuh
+  lisensi data resmi dari brand (pola Perfect Corp/ModiFace) — di luar jangkauan app independen tanpa
+  partnership.
+- Rekomendasi TEKS nama produk asli sebagai "closest match" (bukan render) masuk kategori
+  *nominative fair use* — preseden nyata: Temptalia's Foundation Matrix cross-reference shade
+  puluhan brand by name tanpa lisensi, banyak "shade dupe finder" tool serupa jalan bertahun-tahun.
+  Karena warna yang dipakai user MURNI dari palette kita sendiri (brand data cuma dipakai di langkah
+  lookup terakhir), ini malah risiko LEBIH RENDAH dibanding rekomendasi berbasis skin-tone langsung.
+- **Syarat wajib kalau dibangun**: (1) tabel referensi hex→brand+shade sumbernya dari data yang
+  brand PUBLIKASIKAN sendiri di web resmi mereka (bukan scraping database proprietary), (2) TIDAK
+  PERNAH pakai logo/wordmark brand, (3) disclaimer jelas "tidak berafiliasi dengan brand manapun,
+  estimasi berdasar info publik", (4) monetisasi via affiliate link = workstream terpisah, wajib
+  daftar resmi affiliate program brand/retailer-nya dulu.
+- **Bukan nasihat hukum** — sebelum fitur ini di-launch komersial, tetap perlu konsultasi pengacara IP
+  untuk review copy/disclaimer aktual.
+
 ## FASE 3: Eyeliner + Eyebrows (BUKAN Softlens Dulu)
 
 Dua kategori makeup paling umum diharapkan ada di app manapun, dan risiko teknisnya paling rendah di
@@ -312,6 +337,23 @@ menambah variasi gaya Blush/Highlighter/Eyeshadow yang sifatnya "nice to have", 
 - **Lipstick**: preservasi kerutan bibir (`lipDetailRatio`), aturan overline (haram overline sudut mulut),
   ombré Korean vs Western — dictionary §10.
 - **Foundation**: CIELAB/ITA color matching (§1D) + kompensasi ashiness kulit gelap (§1C).
+- **Foundation shade-mixing pad 2D (✅ fungsional 2026-07-30, PERLU TUNING LEBIH LANJUT)**: pengganti 5
+  swatch tetap — pad drag 2D (undertone × depth) dalam modal terpisah dari panel dock, grid 2×4 referensi
+  warna (cool/netral/warm/olive × terang/gelap, hasil riset TAMO — model bilinear 2 sudut lama gak bisa
+  jangkau undertone olive karena olive bukan titik tengah garis warm-cool). Beberapa ronde bug navigasi &
+  performa sudah dibereskan sesi ini: drag pakai `react-native-gesture-handler` + Reanimated worklet
+  (bukan PanResponder — worklet jalan di UI thread, jadi gak numpang JS thread yang sama dgn MediaPipe),
+  throttle commit ke store digeser dari 40ms → 16ms. Item terbuka:
+  - **Lag warna di wajah (live AR) masih terasa** — dikonfirmasi user setelah fix throttle. Root cause:
+    render loop kamera sendiri cuma ~17fps (MediaPipe ~26ms/frame, lihat log `FizgravityPerf`), jadi
+    walau commit warna dari JS sudah cepat (16ms), gambar di wajah tetap kebatas nunggu frame render
+    kamera berikutnya. Percepat throttle pad TIDAK akan membantu lebih jauh — perlu riset TAMO terpisah
+    soal optimasi pipeline MediaPipe/kamera itu sendiri kalau mau dikejar (proyek performa, bukan UI).
+  - Palet 8-titik (2×4 grid) sudah lebih baik dari 4-sudut lama, tapi masih jauh dari akurasi profesional
+    (Pantone SkinTone Guide pakai 100+ swatch). Kalau user masih sering gak nemu warna kulitnya sendiri,
+    pertimbangkan nambah titik referensi lagi atau riset ulang.
+  - `react-native-gesture-handler` baru pertama kali dipakai di app ini — cek gotcha autolinking statis
+    di atas kalau nanti nambah native dependency lain lagi (masalah sama bakal muncul lagi kalau lupa).
 - **Kualitas batas bibir (✅ SELESAI 2026-07-29)**: bocor ke kulit kumis/dagu fixed (triangulasi khusus
   bibir, bukan mesh wajah penuh), tepi patah-segi fixed (Catmull-Rom spline, 11 titik → ~51 titik per
   kontur), celah/mangap seam fixed (seam band pakai SATU sinyal global "seberapa terbuka mulut" dari
@@ -362,6 +404,30 @@ Setelah prasyarat iris landmark terverifikasi (Fase 3 audit):
 - Hand-tracking gesture UI nyata (infra JNI sudah ada tapi model Rust-nya sekarang MOCK/data palsu — perlu
   model ONNX asli sebelum layak dipakai).
 - Color-accurate shade matching ke SKU produk asli → jembatani try-on virtual ke pembelian nyata.
+
+## FASE 8: Try-On UI Chrome — Navigasi FAB & Polish Visual (ide 2026-07-30, timing diserahkan ke mandor)
+
+Ide user, dicatat lengkap biar gak hilang, dieksekusi belakangan:
+
+- Ganti dock horizontal (pill 5 ikon) jadi **FAB bulat mengambang** di pojok kanan-bawah, dengan idle
+  animation (berdenyut/pulsing) supaya mengundang rasa penasaran untuk di-tap.
+- Tap FAB → animasi **morph dari lingkaran jadi menu vertikal** (list ikon kategori makeup memanjang ke
+  atas dari posisi FAB), lalu setelah kategori dipilih animasi balik jadi lingkaran, dock lagi ke pojok
+  kanan-bawah.
+- Navigasi tambahan: **swipe horizontal antar panel kategori** (mis. dari panel Foundation swipe ke panel
+  Concealer) sebagai alternatif selain lewat FAB.
+- Polish terpisah (independen dari FAB, bisa dikerjakan kapan saja): batas siku antara frame card luar dan
+  konten di dalam semua panel kategori sekarang masih kelihatan jelas/tidak menyatu — perlu diperhalus
+  (border-radius & layering konsisten antar level, bukan cuma nested box bersudut tajam).
+
+**Rekomendasi mandor soal timing**: tunda dulu. Dock/panel yang ada sekarang baru stabil setelah beberapa
+ronde perbaikan bug nyata di sesi ini (dock ke-block saat panel terbuka, konten "tenggelam", modal nutupin
+preview) — FAB+morph+swipe adalah perubahan besar & animasi-berat (butuh Reanimated gesture state machine
+baru) yang akan menimpa ulang fondasi navigasi yang belum genap sehari stabil. Selesaikan dulu retuning
+Fase 0.1 sisanya (Concealer/Contour/Blush/Highlighter/Eyeshadow) + konfirmasi on-device untuk fix
+Foundation retuning & bug opacity lipstick yang masih pending, baru kerjakan FAB redesign ini sebagai SATU
+putaran UI/animasi terpisah — supaya tidak didesain ulang dua kali kalau kebutuhan navigasi berubah begitu
+fitur inti lain ditambahkan.
 
 ---
 

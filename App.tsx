@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, BackHandler } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import HomeScreen from './src/screens/HomeScreen';
 import TryOnScreen from './src/screens/TryOnScreen';
@@ -34,35 +35,37 @@ const App = () => {
   }, [activeTab]);
 
   return (
-    <SafeAreaProvider>
-      <View style={styles.root}>
-        <View style={styles.screenArea}>
-          {activeTab === 'home' && <HomeScreen />}
-          {activeTab === 'tryon' && <TryOnScreen onBack={() => setActiveTab('home')} />}
-          {activeTab === 'looks' && <ComingSoonScreen title="Galeri Look" />}
-          {activeTab === 'profile' && <ComingSoonScreen title="Profil" />}
-        </View>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <View style={styles.root}>
+          <View style={styles.screenArea}>
+            {activeTab === 'home' && <HomeScreen />}
+            {activeTab === 'tryon' && <TryOnScreen onBack={() => setActiveTab('home')} />}
+            {activeTab === 'looks' && <ComingSoonScreen title="Galeri Look" />}
+            {activeTab === 'profile' && <ComingSoonScreen title="Profil" />}
+          </View>
 
-        {activeTab !== 'tryon' && (
-          <SafeAreaView style={styles.tabBarSafe} edges={['bottom']}>
-            <View style={styles.tabBar}>
-              <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('home')}>
-                <TabIcon active={activeTab === 'home'} glyph="⌂" label="Home" />
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('tryon')}>
-                <TabIcon active={false} glyph="◉" label="Try-On" />
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('looks')}>
-                <TabIcon active={activeTab === 'looks'} glyph="▦" label="Looks" />
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('profile')}>
-                <TabIcon active={activeTab === 'profile'} glyph="◍" label="Profil" />
-              </TouchableOpacity>
-            </View>
-          </SafeAreaView>
-        )}
-      </View>
-    </SafeAreaProvider>
+          {activeTab !== 'tryon' && (
+            <SafeAreaView style={styles.tabBarSafe} edges={['bottom']}>
+              <View style={styles.tabBar}>
+                <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('home')}>
+                  <TabIcon active={activeTab === 'home'} glyph="⌂" label="Home" />
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('tryon')}>
+                  <TabIcon active={false} glyph="◉" label="Try-On" />
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('looks')}>
+                  <TabIcon active={activeTab === 'looks'} glyph="▦" label="Looks" />
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.tabTouch} onPress={() => setActiveTab('profile')}>
+                  <TabIcon active={activeTab === 'profile'} glyph="◍" label="Profil" />
+                </TouchableOpacity>
+              </View>
+            </SafeAreaView>
+          )}
+        </View>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 };
 
