@@ -75,10 +75,36 @@ class FizgravityARViewManager : SimpleViewManager<FizgravityARView>() {
         }
     }
 
-    @com.facebook.react.uimanager.annotations.ReactProp(name = "makeupConcealer")
-    fun setMakeupConcealer(view: FizgravityARView, colorArray: com.facebook.react.bridge.ReadableArray?) {
+    // Concealer: 4 independent simultaneously-active layers (2026-07-30 rework),
+    // not a mutually exclusive style — each has its own color+opacity prop, mapped
+    // to nativeSetMakeup regionTypes 6-9. See FizgravityRenderer.cpp's own comment
+    // on why Traditional/Peach share one geometric mask (applied in that layer
+    // order) while Facelift/Green each get their own dedicated area.
+    @com.facebook.react.uimanager.annotations.ReactProp(name = "makeupConcealerTraditional")
+    fun setMakeupConcealerTraditional(view: FizgravityARView, colorArray: com.facebook.react.bridge.ReadableArray?) {
         if (colorArray != null && colorArray.size() == 4) {
             FizgravityRenderer.nativeSetMakeup(6, colorArray.getDouble(0).toFloat(), colorArray.getDouble(1).toFloat(), colorArray.getDouble(2).toFloat(), colorArray.getDouble(3).toFloat())
+        }
+    }
+
+    @com.facebook.react.uimanager.annotations.ReactProp(name = "makeupConcealerFacelift")
+    fun setMakeupConcealerFacelift(view: FizgravityARView, colorArray: com.facebook.react.bridge.ReadableArray?) {
+        if (colorArray != null && colorArray.size() == 4) {
+            FizgravityRenderer.nativeSetMakeup(7, colorArray.getDouble(0).toFloat(), colorArray.getDouble(1).toFloat(), colorArray.getDouble(2).toFloat(), colorArray.getDouble(3).toFloat())
+        }
+    }
+
+    @com.facebook.react.uimanager.annotations.ReactProp(name = "makeupConcealerGreen")
+    fun setMakeupConcealerGreen(view: FizgravityARView, colorArray: com.facebook.react.bridge.ReadableArray?) {
+        if (colorArray != null && colorArray.size() == 4) {
+            FizgravityRenderer.nativeSetMakeup(8, colorArray.getDouble(0).toFloat(), colorArray.getDouble(1).toFloat(), colorArray.getDouble(2).toFloat(), colorArray.getDouble(3).toFloat())
+        }
+    }
+
+    @com.facebook.react.uimanager.annotations.ReactProp(name = "makeupConcealerPeach")
+    fun setMakeupConcealerPeach(view: FizgravityARView, colorArray: com.facebook.react.bridge.ReadableArray?) {
+        if (colorArray != null && colorArray.size() == 4) {
+            FizgravityRenderer.nativeSetMakeup(9, colorArray.getDouble(0).toFloat(), colorArray.getDouble(1).toFloat(), colorArray.getDouble(2).toFloat(), colorArray.getDouble(3).toFloat())
         }
     }
 
@@ -111,11 +137,6 @@ class FizgravityARViewManager : SimpleViewManager<FizgravityARView>() {
     @com.facebook.react.uimanager.annotations.ReactProp(name = "makeupFoundationBlur", defaultFloat = 0.0f)
     fun setMakeupFoundationBlur(view: FizgravityARView, radius: Float) {
         FizgravityRenderer.nativeSetFoundationBlur(radius)
-    }
-
-    @com.facebook.react.uimanager.annotations.ReactProp(name = "makeupConcealerStyle")
-    fun setMakeupConcealerStyle(view: FizgravityARView, style: Int) {
-        FizgravityRenderer.nativeSetConcealerStyle(style)
     }
 
     @com.facebook.react.uimanager.annotations.ReactProp(name = "scanTrigger")

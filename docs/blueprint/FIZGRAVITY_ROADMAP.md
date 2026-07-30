@@ -354,6 +354,46 @@ menambah variasi gaya Blush/Highlighter/Eyeshadow yang sifatnya "nice to have", 
     pertimbangkan nambah titik referensi lagi atau riset ulang.
   - `react-native-gesture-handler` baru pertama kali dipakai di app ini — cek gotcha autolinking statis
     di atas kalau nanti nambah native dependency lain lagi (masalah sama bakal muncul lagi kalau lupa).
+- **Concealer — direstrukturisasi jadi 4 layer independen (2026-07-30/31)**: awalnya cuma retuning blend
+  mode (Normal Alpha, bukan Soft Light, sesuai spec §2 "2D Flat | Opacity Tinggi"), tapi user tunjukkan
+  arsitektur `concealerStyle` mutually-exclusive itu sendiri salah — di dunia nyata Traditional/Facelift/
+  Green/Peach itu produk BEDA yang dipakai BARENG di titik berbeda wajah, bukan pilih salah satu. Full
+  rework: shader render 4 layer sekaligus (Peach→Traditional di area bawah mata yang sama, urutan sesuai
+  spec §2B "Layer 1 Peach → Layer 2 Brightening"; Facelift & Green masing-masing area sendiri), state Zustand
+  per-layer independen, JNI regionType 6-9 per layer. UI sempat kebesar (4 seksi penuh nutupin preview) —
+  diperbaiki jadi accordion (4 baris ringkas, expand satu-satu, tapi semua tetap render bareng di background).
+  - **Green dipindah ke area hidung (alar base)** — sebelumnya numpang mask bawah mata punya Traditional/
+    Peach, padahal spec eksplisit Green itu buat kemerahan di cuping hidung, bukan mata panda. Titik landmark
+    baru di-derive dari canonical_face_model.obj (lihat `get_concealer_indices.py`).
+  - **Facelift diperlebar (2026-07-31)** — user lapor efeknya nyaris gak kelihatan; ternyata cluster titik
+    lama cuma ~0.4-0.9 unit lebar, numpuk PERSIS di sudut mata/mulut tanpa menjorok ke arah pelipis/telinga
+    seperti teknik lifting aslinya (garis diagonal DARI sudut KE arah angkat). Diperlebar jadi diagonal
+    beneran menuju pelipis (pinjam beberapa titik CONTOUR, area itu nyaris habis diklaim CONTOUR) dan
+    menuju telinga/pipi bawah untuk sudut mulut.
+  - **Facelift confirmed kelihatan (2026-07-31)** oleh user setelah diperlebar.
+  - **Warna Green/Peach sekarang otomatis nyesuain kedalaman kulit (2026-07-31, riset TAMO)** — dulu 1 hex
+    tetap buat semua orang. Riset (Michaelan, House of Makeup, Live Tinted, Dermaflage, e.l.f., dll)
+    konfirmasi: Peach→Orange itu praktik nyata MUA profesional, dipilih berdasar kedalaman kulit (kulit
+    terang=peach, kulit gelap=orange beneran — geser hue+saturation, bukan cuma gelap/terangin satu warna).
+    Green juga perlu berubah tapi arahnya beda: makin gelap/saturated di kulit gelap (BUKAN makin terang —
+    hijau pastel/mint di kulit gelap kelihatan abu-abu/ashy). Diimplementasi pakai `correctorByDepth()` di
+    shader, reuse `skinLuma` yang udah ada (dipakai juga buat anti-ashiness Foundation) — otomatis live,
+    user gak perlu pilih bucket kedalaman kulit manual. 4 titik referensi tervalidasi riset per corrector
+    (light/medium/tan/deep).
+  - **Facelift diperluas jadi 4 zona lengkap (✅ SELESAI 2026-07-31, riset TAMO)** — teknik asli dari
+    Charlotte Tilbury (pencipta teknik "concealer facelift" ini) memang 4 zona, bukan 2. Ditambahkan: zona
+    "pinch" (sudut dalam mata turun sisi hidung, anchor titik 133 yang sama dipakai RIGHT_EYESHADOW_REGION)
+    dan zona cekungan pipi (telinga→mulut→naik ke hidung, titik-titiknya kebetulan masih bebas semua, gak
+    perlu reuse dari BLUSH/CONTOUR). User yang minta ditambah setelah dikasih pilihan cukup-2-zona vs
+    lengkap-4-zona.
+  - **Belum dites di wajah asli untuk versi final** (skenario 4-layer + area Facelift/Green baru + depth-
+    scaling corrector) — perlu konfirmasi user on-device.
+  - **Gap taksonomi masih ada (belum digarap, item terpisah)**: dictionary §2A bedain 3 sub-tipe Traditional
+    Concealer (Spot: 1:1 shade/matte, Brightening: 1-2 shade lebih terang/luminous, Sculpting: 2-3 shade
+    lebih gelap/liquid contouring) — UI sekarang cuma punya satu "Traditional" generik tanpa distingsi ini.
+    Ini scope FITUR baru, bukan retuning parameter — sama polanya kayak Foundation punya CIELAB/ITA yang
+    juga belum digarap di atas. Angka shade-offset di atas SUDAH tervalidasi riset (2026-07-31, sesuai
+    konsensus profesional), gak perlu diragukan lagi kalau nanti mau diimplementasi.
 - **Kualitas batas bibir (✅ SELESAI 2026-07-29)**: bocor ke kulit kumis/dagu fixed (triangulasi khusus
   bibir, bukan mesh wajah penuh), tepi patah-segi fixed (Catmull-Rom spline, 11 titik → ~51 titik per
   kontur), celah/mangap seam fixed (seam band pakai SATU sinyal global "seberapa terbuka mulut" dari

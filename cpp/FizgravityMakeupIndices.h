@@ -116,17 +116,30 @@ static const unsigned short FACE_OVAL_INDICES[] = {
 };
 
 // Concealer target regions, derived via get_concealer_indices.py (geometric
-// bounding-box selection on canonical_face_model.obj, cross-checked against
-// every other named array in this file to guarantee zero overlap). Under-eye
-// sits in the tear-trough strip directly below LEFT/RIGHT_EYESHADOW_REGION and
-// above BLUSH_INDICES' cheek; nasolabial fold runs from the nose ala down
-// toward (not touching) the mouth corner, staying clear of LIP_INDICES.
+// bounding-box selection on canonical_face_model.obj). Nasolabial fold runs
+// from the nose ala down toward (not touching) the mouth corner, staying clear
+// of LIP_INDICES. Under-eye WIDENED 2026-07-30: the original single-row version
+// (just 229-233) rendered as a visible LINE, not an area — confirmed on-device,
+// since per-vertex alpha fades to 0 within one triangle-width of any listed
+// vertex, and a single row has no second row to sustain coverage further out.
+// Now 3 rows spanning lash-line down into the upper cheek; rows 1 and 3
+// deliberately REUSE RIGHT/LEFT_EYESHADOW_REGION's bottom edge and BLUSH's
+// cheek top edge (the narrow gap between those regions + CONTOUR left only ONE
+// unclaimed vertex to work with) — intentional, controlled overlap that mirrors
+// how concealer physically borders eyeshadow/blush in real application. The
+// radial falloff in bakeConcealerRegion() (FizgravityRenderer.cpp) already
+// tapers alpha down toward these outer rows since they sit furthest from the
+// region's centroid, so it still reads as strongest at the true tear-trough.
 static const unsigned short UNDER_EYE_RIGHT_INDICES[] = {
-    229, 230, 231, 232, 233
+    112, 26, 22, 23, 24,
+    229, 230, 231, 232, 233,
+    121, 120, 119, 118
 };
 
 static const unsigned short UNDER_EYE_LEFT_INDICES[] = {
-    449, 450, 451, 452, 453
+    341, 256, 252, 253, 254,
+    449, 450, 451, 452, 453,
+    350, 349, 348, 347
 };
 
 static const unsigned short NASOLABIAL_FOLD_RIGHT_INDICES[] = {
@@ -137,20 +150,77 @@ static const unsigned short NASOLABIAL_FOLD_LEFT_INDICES[] = {
     327, 423, 426, 391, 322, 410
 };
 
+// Facelift's "lift" zones WIDENED (2026-07-31) — the original 8-point clusters
+// below were confirmed on-device to barely span ~0.4-0.9 units, sitting almost
+// exactly ON the eye/mouth corner instead of extending outward toward the
+// temple/ear the way a real optical-lift contour needs to (the technique IS a
+// diagonal line FROM the corner TOWARD the lift direction — a tight dot at the
+// corner alone can't read as that shape). User confirmed: "gak terlalu terlihat
+// efeknya". Outer-eye toward the temple found only ONE unclaimed vertex (124 —
+// CONTOUR already fences in almost all of that zone), so the extension
+// deliberately reuses several of CONTOUR's own temple points (31/35/143/156/139)
+// — same controlled-overlap approach already used for UNDER_EYE's outer rows.
+// Mouth-corner toward the ear had plenty of free vertices, no reuse needed.
 static const unsigned short FACELIFT_OUTER_EYE_RIGHT_INDICES[] = {
-    130, 33, 25, 247, 7, 246, 113, 226
+    130, 33, 25, 247, 7, 246, 113, 226, // original corner cluster
+    124, 31, 35, 143, 156, 139          // extension toward temple
 };
 
 static const unsigned short FACELIFT_OUTER_EYE_LEFT_INDICES[] = {
-    359, 263, 255, 467, 249, 466, 342, 446
+    359, 263, 255, 467, 249, 466, 342, 446,
+    353, 261, 265, 372, 383, 368
 };
 
 static const unsigned short FACELIFT_MOUTH_RIGHT_INDICES[] = {
-    61, 76, 62, 78, 146, 185, 184, 77
+    61, 76, 62, 78, 146, 185, 184, 77,  // original corner cluster
+    57, 216, 212, 202, 210, 214, 192, 213 // extension toward ear/cheek
 };
 
 static const unsigned short FACELIFT_MOUTH_LEFT_INDICES[] = {
-    291, 306, 292, 308, 375, 409, 408, 307
+    291, 306, 292, 308, 375, 409, 408, 307,
+    287, 436, 432, 422, 430, 434, 416, 433
+};
+
+// Facelift EXTENDED to the full 4-zone technique (2026-07-31, TAMO research pass)
+// — the 2 zones above are a real but simplified subset; Charlotte Tilbury's own
+// "concealer facelift" guide (the technique's most-credited originator) adds two
+// more zones: a "pinch" line from the inner eye corner down the side of the nose,
+// and a cheek-hollow line curving from the ear toward the mouth then angling up
+// toward the nose (cheekbone accentuation).
+static const unsigned short FACELIFT_PINCH_RIGHT_INDICES[] = {
+    133, 122, 114, 126
+};
+
+static const unsigned short FACELIFT_PINCH_LEFT_INDICES[] = {
+    362, 351, 343, 355
+};
+
+static const unsigned short FACELIFT_CHEEK_HOLLOW_RIGHT_INDICES[] = {
+    207, 187, 123, 132, 93
+};
+
+static const unsigned short FACELIFT_CHEEK_HOLLOW_LEFT_INDICES[] = {
+    427, 411, 352, 361, 323
+};
+
+// Green corrector's own target area (2026-07-30) — dictionary spec lists Green
+// Corrector's use case as "Redness (Alar Base)" with suggested indices
+// [234, 454, 98, 327], a DIFFERENT area from Dark Circles (Tear Trough). Green
+// was previously wired to the SAME under-eye+nasolabial mask as Traditional/
+// Peach, which is conceptually wrong (green neutralizes redness — nose/cheek
+// flare, rosacea — not blue-purple dark circles) and was the root cause of user
+// confusion testing it ("kok cuma dikit, baru muncul pas pindah ke Traditional").
+// Of the spec's 4 suggested indices, only 98/327 (the true nose-ala tip, already
+// reused as NASOLABIAL_FOLD's anchor point) sit where they should geometrically;
+// 234/454 sit far out near the jaw/temple, not the nose — likely a documentation
+// error, so not used here. Point set found via the same exhaustive-scan approach
+// as UNDER_EYE above, centered on 98/327's actual coordinates.
+static const unsigned short ALAR_BASE_RIGHT_INDICES[] = {
+    98, 240, 75, 235, 59, 64, 129, 102, 36, 49
+};
+
+static const unsigned short ALAR_BASE_LEFT_INDICES[] = {
+    327, 460, 305, 455, 289, 294, 358, 331, 266, 279
 };
 
 #endif

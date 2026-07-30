@@ -190,13 +190,31 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
     // UI Colors
     uniform vec4 uFoundationColor;
     uniform int uFoundationType;
-    uniform int uConcealerStyle;
+    // Concealer: 4 independent simultaneously-active layers (2026-07-30 rework),
+    // not a mutually exclusive style selector — matches how real concealer/
+    // corrector products are actually layered on different spots of the face at
+    // once. Peach + Traditional share the under-eye/nasolabial mask (R channel
+    // of sConcealerMaskTex) and composite in that order per the dictionary's own
+    // "Layer 1 Peach Corrector -> Layer 2 Brightening" dark-circle technique;
+    // Facelift uses its own lift-zone mask (G channel); Green uses its own
+    // alar-base mask (B channel) — previously wrongly shared the under-eye mask,
+    // which is why it read as almost invisible/confusing (redness correction on
+    // an area that mostly isn't red) until this split.
+    uniform vec4 uConcealerTraditionalColor;
+    uniform vec4 uConcealerFaceliftColor;
+    // Green/Peach's .rgb is intentionally UNUSED below (2026-07-31) — their actual
+    // rendered color is computed live from skinLuma via correctorByDepth() instead
+    // of a fixed hex, since real correctors shift hue/saturation with the wearer's
+    // skin depth (see that function's own comment). Only .a (coverage/opacity)
+    // from these two uniforms is read. Kept as vec4 for symmetry with the other
+    // two layers and because the JS side's ReactProp already sends a full RGBA.
+    uniform vec4 uConcealerGreenColor;
+    uniform vec4 uConcealerPeachColor;
     uniform vec4 uContourColor;
     uniform vec4 uBlushColor;
     uniform vec4 uHighlightColor;
     uniform vec4 uEyeshadowColor;
     uniform vec4 uLipstickColor;
-    uniform vec4 uConcealerColor;
     uniform int uLipstickFinish; // 0=matte, 1=satin, 2=glossy, 3=sheer, 4=shimmer
     uniform float uLipstickGlossiness;
 
@@ -252,6 +270,22 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
         return vec3(blendOverlayChannel(base.r, blend.r),
                     blendOverlayChannel(base.g, blend.g),
                     blendOverlayChannel(base.b, blend.b));
+    }
+    // Color correctors (Green/Peach) shouldn't be one fixed hex regardless of the
+    // wearer's own skin depth (2026-07-31, TAMO research pass) — confirmed against
+    // multiple professional MUA/color-theory sources: peach-vs-orange for dark
+    // circles is standard practice keyed to skin depth (fair->peach, deep->true
+    // orange, shifting hue/saturation, not just lightness), and green correctors
+    // need to get MORE saturated/deeper (not lighter/pastel) on deeper skin to
+    // avoid an ashy/gray cast. Reuses skinLuma (already computed above for
+    // Foundation's dark-skin ashiness compensation) instead of asking the user to
+    // manually pick a skin-depth bucket. 4 reference stops per corrector,
+    // sequential smoothstep transitions (deep->tan->medium->light as luma rises).
+    vec3 correctorByDepth(vec3 deep, vec3 tan, vec3 medium, vec3 light, float luma) {
+        vec3 c = mix(deep, tan, smoothstep(0.32, 0.42, luma));
+        c = mix(c, medium, smoothstep(0.45, 0.55, luma));
+        c = mix(c, light, smoothstep(0.58, 0.68, luma));
+        return c;
     }
 
     // Six rounds of procedural noise (screen-space noise, sin()-based hash breaking
@@ -352,9 +386,15 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             lipAlpha = smoothstep(0.05, 0.20, lipMask);
         }
         float eyeAlpha       = texture2D(sEyeMaskTex, vTexCoord).r * faceMask;
-        float concealerAlpha = texture2D(sConcealerMaskTex, vTexCoord).r * faceMask;
+        // 3 independent concealer regions baked into one RGB texture (see PASS 1e
+        // in FizgravityRenderer.cpp): R=under-eye+nasolabial (Traditional/Peach),
+        // G=facelift lift zones, B=alar base (Green).
+        vec3 concealerMask = texture2D(sConcealerMaskTex, vTexCoord).rgb * faceMask;
+        float concealerUnderEyeAlpha = concealerMask.r;
+        float concealerFaceliftAlpha = concealerMask.g;
+        float concealerAlarAlpha = concealerMask.b;
 
-        if (faceMask > 0.0 || contourAlpha > 0.0 || blushAlpha > 0.0 || highlightAlpha > 0.0 || lipAlpha > 0.0 || eyeAlpha > 0.0 || concealerAlpha > 0.0) {
+        if (faceMask > 0.0 || contourAlpha > 0.0 || blushAlpha > 0.0 || highlightAlpha > 0.0 || lipAlpha > 0.0 || eyeAlpha > 0.0 || concealerUnderEyeAlpha > 0.0 || concealerFaceliftAlpha > 0.0 || concealerAlarAlpha > 0.0) {
             // Spatial radius must be large enough (>15px) to blur out pores so they are isolated in highFreq
             float activeRadius = 16.0; 
             vec3 blurred = computeBlur(sCameraTex, vTexCoord, uTexelSize, activeRadius);
@@ -452,21 +492,59 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             // Final composite: blend the foundation color effect onto the currentSkin (which may already be smoothed)
             currentSkin = mix(currentSkin, foundationEffect, effectiveOpacity * foundationMask);
 
-            // [2] CONCEALER
-            vec3 tintedConcealerColor = uConcealerColor.rgb * ambientTint;
-            float concealerStrength = concealerAlpha * uConcealerColor.a;
-            if (uConcealerStyle == 2 || uConcealerStyle == 3) {
-                float targetingMask = 1.0;
-                if (uConcealerStyle == 2) {
-                    float redness = origColor.r - (origColor.g + origColor.b * 0.5);
-                    targetingMask = smoothstep(-0.05, 0.05, redness);
-                }
-                vec3 correctorTarget = blendSoftLight(blurred, tintedConcealerColor);
-                currentSkin = mix(currentSkin, correctorTarget + highFreq, concealerStrength * targetingMask);
-            } else {
-                vec3 concealerLowFreq = mix(blurred, tintedConcealerColor, concealerStrength);
-                currentSkin = mix(currentSkin, concealerLowFreq + highFreq, concealerStrength);
-            }
+            // [2] CONCEALER — 4 independent layers, composited in the order a real
+            // makeup routine would build them up: color correctors first (Peach on
+            // dark circles, Green on redness), then Traditional coverage/brightening
+            // on top of the same dark-circle area (per the dictionary's own "Layer 1
+            // Peach Corrector -> Layer 2 Brightening" technique), then Facelift's
+            // separate sculpting zones. Dictionary spec: Concealer's own section
+            // header states "Sifat Render: 2D Flat | Opacity Tinggi" and the
+            // top-level blend-mode table lists Concealer under Normal Alpha (same row
+            // as Foundation) — every layer below uses a plain mix(), not a glaze.
+
+            // Layer 1: Peach corrector (dark circles / blue-purple cancel) — under-eye
+            // mask. Color scales with the wearer's own skin depth (peach on fair skin
+            // -> true orange on deep skin, per TAMO research — see correctorByDepth's
+            // own comment) instead of a fixed hex regardless of who's wearing it.
+            vec3 peachDepthColor = correctorByDepth(vec3(0.788, 0.416, 0.243), vec3(0.910, 0.525, 0.353), vec3(1.0, 0.690, 0.522), vec3(1.0, 0.788, 0.651), skinLuma);
+            vec3 tintedPeach = peachDepthColor * ambientTint;
+            float peachStrength = concealerUnderEyeAlpha * uConcealerPeachColor.a;
+            vec3 peachTarget = mix(blurred, tintedPeach, peachStrength);
+            currentSkin = mix(currentSkin, peachTarget + highFreq, peachStrength);
+
+            // Layer 2: Traditional concealer (shade-matched coverage/brightening) —
+            // same under-eye mask, composited ON TOP of Peach.
+            vec3 tintedTraditional = uConcealerTraditionalColor.rgb * ambientTint;
+            float traditionalStrength = concealerUnderEyeAlpha * uConcealerTraditionalColor.a;
+            vec3 traditionalTarget = mix(blurred, tintedTraditional, traditionalStrength);
+            currentSkin = mix(currentSkin, traditionalTarget + highFreq, traditionalStrength);
+
+            // Layer 3: Facelift (sculpting concealer at outer-eye/mouth-corner lift zones).
+            vec3 tintedFacelift = uConcealerFaceliftColor.rgb * ambientTint;
+            float faceliftStrength = concealerFaceliftAlpha * uConcealerFaceliftColor.a;
+            vec3 faceliftTarget = mix(blurred, tintedFacelift, faceliftStrength);
+            currentSkin = mix(currentSkin, faceliftTarget + highFreq, faceliftStrength);
+
+            // Layer 4: Green corrector (redness cancel) — alar-base mask, its own
+            // region (2026-07-30: previously wrongly shared the under-eye mask).
+            // Redness-targeting mask has a 0.35 floor — was a hard
+            // smoothstep(-0.05, 0.05, redness) (0 unless the pixel is actively red,
+            // rosacea/acne level), which on skin WITHOUT strong redness left the
+            // corrector nearly invisible at any coverage. Green correctors are also
+            // legitimately used preemptively on generally sallow/uneven tone, not
+            // only literal inflammation, so the floor keeps some visible effect
+            // everywhere the region applies, while redder pixels still get pushed
+            // toward full strength on top of it.
+            // Color also scales with skin depth (deeper/more saturated green on
+            // deeper skin, NOT lighter — a pale mint green reads ashy/gray there;
+            // see correctorByDepth's own comment).
+            vec3 greenDepthColor = correctorByDepth(vec3(0.247, 0.490, 0.353), vec3(0.361, 0.620, 0.463), vec3(0.471, 0.710, 0.553), vec3(0.561, 0.780, 0.627), skinLuma);
+            vec3 tintedGreen = greenDepthColor * ambientTint;
+            float greenRedness = origColor.r - (origColor.g + origColor.b * 0.5);
+            float greenTargetingMask = mix(0.35, 1.0, smoothstep(-0.05, 0.05, greenRedness));
+            float greenStrength = concealerAlarAlpha * uConcealerGreenColor.a * greenTargetingMask;
+            vec3 greenTarget = mix(blurred, tintedGreen, greenStrength);
+            currentSkin = mix(currentSkin, greenTarget + highFreq, greenStrength);
 
             // [3] CONTOUR (Hybrid Multiply + Linear Burn)
             vec3 tintedContourColor = uContourColor.rgb * ambientTint;
@@ -722,9 +800,11 @@ struct RendererContext {
     GLint fndLipMaskTexHandle;
     GLint fndEyeshadowColorHandle;
     GLint fndEyeMaskTexHandle;
-    GLint fndConcealerColorHandle;
+    GLint fndConcealerTraditionalColorHandle;
+    GLint fndConcealerFaceliftColorHandle;
+    GLint fndConcealerGreenColorHandle;
+    GLint fndConcealerPeachColorHandle;
     GLint fndConcealerMaskTexHandle;
-    GLint fndConcealerStyleHandle;
     GLint fndContourStyleHandle;
     GLint fndBlushStyleHandle;
     GLint fndScaleHandle;
@@ -770,13 +850,20 @@ struct RendererContext {
     int lipstickFinish = 0; // 0=matte, 1=satin, 2=glossy, 3=sheer, 4=shimmer
     float lipstickGlossiness = 0.5f;
     float eyeshadowColor[4] = {0.3f, 0.2f, 0.15f, 0.0f};
-    float concealerColor[4] = {0.85f, 0.65f, 0.5f, 0.0f};
-    
+    // 4 independent concealer layers (2026-07-30 rework) — see the shader's own
+    // comment on why these are simultaneous, not a mutually exclusive style. Green/
+    // Peach's colors are fixed by the JS store (not user-adjustable swatches) but
+    // still passed as real uniforms rather than shader constants, for consistency
+    // with Traditional/Facelift and to leave room for future adjustability.
+    float concealerTraditionalColor[4] = {0.85f, 0.65f, 0.5f, 0.0f};
+    float concealerFaceliftColor[4] = {0.85f, 0.65f, 0.5f, 0.0f};
+    float concealerGreenColor[4] = {0.471f, 0.710f, 0.557f, 0.0f};
+    float concealerPeachColor[4] = {1.0f, 0.690f, 0.522f, 0.0f};
+
     int foundationType = 0; // 0=matte, 1=dewy, 2=sheer
     float foundationBlurRadius = 8.0f; // texel-multiplier for frequency-separation low-pass blur
     int contourStyle = 0;   // 0=normal, 1=slim, 2=pinch, 3=straighten (drives live nose contour+highlight geometry)
     int blushStyle = 0;     // 0=normal, 1=contour_45, 2=horizontal
-    int concealerStyle = 0; // 0=Traditional, 1=Facelift, 2=Green, 3=Peach
 
     float ambientCctKelvin = 6500.0f; // Neutral D65 daylight default — safe no-op tint until real data arrives
     float ambientIntensity = 1.0f;    // Neutral (no darkening) default
@@ -875,9 +962,11 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     gCtx.fndLipMaskTexHandle = glGetUniformLocation(gCtx.foundationProgram, "sLipMaskTex");
     gCtx.fndEyeshadowColorHandle = glGetUniformLocation(gCtx.foundationProgram, "uEyeshadowColor");
     gCtx.fndEyeMaskTexHandle = glGetUniformLocation(gCtx.foundationProgram, "sEyeMaskTex");
-    gCtx.fndConcealerColorHandle = glGetUniformLocation(gCtx.foundationProgram, "uConcealerColor");
+    gCtx.fndConcealerTraditionalColorHandle = glGetUniformLocation(gCtx.foundationProgram, "uConcealerTraditionalColor");
+    gCtx.fndConcealerFaceliftColorHandle = glGetUniformLocation(gCtx.foundationProgram, "uConcealerFaceliftColor");
+    gCtx.fndConcealerGreenColorHandle = glGetUniformLocation(gCtx.foundationProgram, "uConcealerGreenColor");
+    gCtx.fndConcealerPeachColorHandle = glGetUniformLocation(gCtx.foundationProgram, "uConcealerPeachColor");
     gCtx.fndConcealerMaskTexHandle = glGetUniformLocation(gCtx.foundationProgram, "sConcealerMaskTex");
-    gCtx.fndConcealerStyleHandle = glGetUniformLocation(gCtx.foundationProgram, "uConcealerStyle");
     gCtx.fndScaleHandle = glGetUniformLocation(gCtx.foundationProgram, "uScale");
     gCtx.fndOffsetHandle = glGetUniformLocation(gCtx.foundationProgram, "uOffset");
     gCtx.fndBoundsHandle = glGetUniformLocation(gCtx.foundationProgram, "uFaceBounds");
@@ -904,9 +993,11 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass claz
     if (gCtx.fndLipMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sLipMaskTex' not found");
     if (gCtx.fndEyeshadowColorHandle == -1) LOGE("Foundation shader: uniform 'uEyeshadowColor' not found");
     if (gCtx.fndEyeMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sEyeMaskTex' not found");
-    if (gCtx.fndConcealerColorHandle == -1) LOGE("Foundation shader: uniform 'uConcealerColor' not found");
+    if (gCtx.fndConcealerTraditionalColorHandle == -1) LOGE("Foundation shader: uniform 'uConcealerTraditionalColor' not found");
+    if (gCtx.fndConcealerFaceliftColorHandle == -1) LOGE("Foundation shader: uniform 'uConcealerFaceliftColor' not found");
+    if (gCtx.fndConcealerGreenColorHandle == -1) LOGE("Foundation shader: uniform 'uConcealerGreenColor' not found");
+    if (gCtx.fndConcealerPeachColorHandle == -1) LOGE("Foundation shader: uniform 'uConcealerPeachColor' not found");
     if (gCtx.fndConcealerMaskTexHandle == -1) LOGE("Foundation shader: uniform 'sConcealerMaskTex' not found");
-    if (gCtx.fndConcealerStyleHandle == -1) LOGE("Foundation shader: uniform 'uConcealerStyle' not found");
     if (gCtx.fndScaleHandle == -1) LOGE("Foundation shader: uniform 'uScale' not found");
     if (gCtx.fndOffsetHandle == -1) LOGE("Foundation shader: uniform 'uOffset' not found");
     if (gCtx.fndBoundsHandle == -1) LOGE("Foundation shader: uniform 'uFaceBounds' not found");
@@ -1707,15 +1798,27 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
             glDisableVertexAttribArray(gCtx.mkAlphaHandle);
 
             // ============================================================
-            // PASS 1e: BAKE CONCEALER WEIGHT into its own dedicated FBO.
-            // Two region types per side: under-eye tear-trough (full
-            // strength) and nasolabial fold (anti-caking — weighted down
-            // relative to under-eye so it doesn't visibly cake in the
-            // deepest part of the fold, per the dictionary's concealer
-            // spec). Uses the same radial smoothstep falloff already used
-            // for BLUSH_INDICES below, computed per-region around its own
-            // live centroid so edges stay soft without a dedicated blur
-            // pass (this FBO, like lipMaskFbo/eyeMaskFbo, isn't blurred).
+            // PASS 1e: BAKE CONCEALER WEIGHT into its own dedicated FBO, as 3
+            // INDEPENDENT channels (2026-07-30 rework) — R=under-eye tear-
+            // trough + nasolabial fold (shared by the Traditional and Peach
+            // layers, per the dictionary's own 2-layer "Peach Corrector ->
+            // Brightening" dark-circle technique), G=facelift lift zones,
+            // B=alar base (Green corrector's own area — previously wrongly
+            // shared the under-eye mask, confirmed on-device that made Green
+            // nearly invisible/confusing since it's meant to target redness
+            // near the nose, not the tear-trough). All 4 concealer "styles"
+            // are now simultaneously-active independent layers rather than a
+            // mutually exclusive selector — real concealer/corrector routines
+            // layer several of these on different spots at once — so every
+            // region bakes every frame regardless of which layers currently
+            // have nonzero opacity; the composite shader below gates each
+            // layer's visibility off its own opacity uniform, not off which
+            // mask got baked. Same multi-channel-bake technique (one shared
+            // geometry + alpha rebind + glColorMask per channel) as the lip
+            // mask above. Each region still uses the same radial smoothstep
+            // falloff around its own live centroid, so edges stay soft
+            // without a dedicated blur pass (this FBO, like lipMaskFbo/
+            // eyeMaskFbo, isn't blurred).
             // ============================================================
             glBindFramebuffer(GL_FRAMEBUFFER, gCtx.concealerMaskFbo.fbo);
             glViewport(0, 0, gCtx.width, gCtx.height);
@@ -1728,10 +1831,25 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
             glVertexAttribPointer(gCtx.mkPositionHandle, 3, GL_FLOAT, GL_FALSE, 0, data);
             glEnableVertexAttribArray(gCtx.mkPositionHandle);
             {
-                static float concealerVertexAlpha[468] = {0.0f};
-                for (int i = 0; i < 468; i++) concealerVertexAlpha[i] = 0.0f;
+                static float underEyeAlpha[468];
+                static float faceliftAlpha[468];
+                static float alarAlpha[468];
+                for (int i = 0; i < 468; i++) { underEyeAlpha[i] = 0.0f; faceliftAlpha[i] = 0.0f; alarAlpha[i] = 0.0f; }
 
-                auto bakeConcealerRegion = [&](const unsigned short* regionIndices, int count, float weightMultiplier) {
+                // radiusPadding defaults to 1.6x (unchanged behavior for every existing
+                // call site). Facelift's pinch zone (2026-07-31) passes a larger value —
+                // that zone's real technique genuinely IS meant to hug the nose bridge
+                // sides closely (a wide X-spread there wouldn't be the correct technique,
+                // unlike the outer-eye/cheek-hollow zones which SHOULD span far), so
+                // instead of adding more landmark points, widening how far each of the
+                // same 4 points' alpha spreads gives fuller/less-patchy coverage from the
+                // same anatomically-correct path. Reported on-device as looking small and
+                // inconsistent side-to-side — a tight, low-coverage mask like the default
+                // is more exposed to real per-pixel lighting/shadow variance (little area
+                // to average over), which reads as "different color left vs right" even
+                // though the underlying alpha mask itself is verified geometrically
+                // symmetric.
+                auto bakeRegion = [&](float* target, const unsigned short* regionIndices, int count, float weightMultiplier, float radiusPadding = 1.6f) {
                     float cx = 0.0f, cy = 0.0f;
                     for (int i = 0; i < count; i++) {
                         cx += data[regionIndices[i] * 3 + 0];
@@ -1746,7 +1864,7 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
                         float dist = sqrtf(dx * dx + dy * dy);
                         if (dist > maxDist) maxDist = dist;
                     }
-                    float radius = maxDist * 1.6f + 0.01f; // pad past the outermost point for soft falloff
+                    float radius = maxDist * radiusPadding + 0.01f; // pad past the outermost point for soft falloff
 
                     for (int i = 0; i < count; i++) {
                         int idx = regionIndices[i];
@@ -1755,25 +1873,47 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
                         float normDist = sqrtf(dx * dx + dy * dy) / radius;
                         float alpha = 1.0f - fminf(normDist, 1.0f);
                         alpha = alpha * alpha * (3.0f - 2.0f * alpha);
-                        concealerVertexAlpha[idx] = alpha * weightMultiplier;
+                        target[idx] = alpha * weightMultiplier;
                     }
                 };
 
-                if (gCtx.concealerStyle == 1) { // Facelift
-                    bakeConcealerRegion(FACELIFT_OUTER_EYE_LEFT_INDICES, sizeof(FACELIFT_OUTER_EYE_LEFT_INDICES) / sizeof(FACELIFT_OUTER_EYE_LEFT_INDICES[0]), 1.0f);
-                    bakeConcealerRegion(FACELIFT_OUTER_EYE_RIGHT_INDICES, sizeof(FACELIFT_OUTER_EYE_RIGHT_INDICES) / sizeof(FACELIFT_OUTER_EYE_RIGHT_INDICES[0]), 1.0f);
-                    bakeConcealerRegion(FACELIFT_MOUTH_LEFT_INDICES, sizeof(FACELIFT_MOUTH_LEFT_INDICES) / sizeof(FACELIFT_MOUTH_LEFT_INDICES[0]), 0.6f);
-                    bakeConcealerRegion(FACELIFT_MOUTH_RIGHT_INDICES, sizeof(FACELIFT_MOUTH_RIGHT_INDICES) / sizeof(FACELIFT_MOUTH_RIGHT_INDICES[0]), 0.6f);
-                } else {
-                    bakeConcealerRegion(UNDER_EYE_LEFT_INDICES, sizeof(UNDER_EYE_LEFT_INDICES) / sizeof(UNDER_EYE_LEFT_INDICES[0]), 1.0f);
-                    bakeConcealerRegion(UNDER_EYE_RIGHT_INDICES, sizeof(UNDER_EYE_RIGHT_INDICES) / sizeof(UNDER_EYE_RIGHT_INDICES[0]), 1.0f);
-                    bakeConcealerRegion(NASOLABIAL_FOLD_LEFT_INDICES, sizeof(NASOLABIAL_FOLD_LEFT_INDICES) / sizeof(NASOLABIAL_FOLD_LEFT_INDICES[0]), 0.6f);
-                    bakeConcealerRegion(NASOLABIAL_FOLD_RIGHT_INDICES, sizeof(NASOLABIAL_FOLD_RIGHT_INDICES) / sizeof(NASOLABIAL_FOLD_RIGHT_INDICES[0]), 0.6f);
-                }
+                bakeRegion(underEyeAlpha, UNDER_EYE_LEFT_INDICES, sizeof(UNDER_EYE_LEFT_INDICES) / sizeof(UNDER_EYE_LEFT_INDICES[0]), 1.0f);
+                bakeRegion(underEyeAlpha, UNDER_EYE_RIGHT_INDICES, sizeof(UNDER_EYE_RIGHT_INDICES) / sizeof(UNDER_EYE_RIGHT_INDICES[0]), 1.0f);
+                bakeRegion(underEyeAlpha, NASOLABIAL_FOLD_LEFT_INDICES, sizeof(NASOLABIAL_FOLD_LEFT_INDICES) / sizeof(NASOLABIAL_FOLD_LEFT_INDICES[0]), 0.6f);
+                bakeRegion(underEyeAlpha, NASOLABIAL_FOLD_RIGHT_INDICES, sizeof(NASOLABIAL_FOLD_RIGHT_INDICES) / sizeof(NASOLABIAL_FOLD_RIGHT_INDICES[0]), 0.6f);
 
-                glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, concealerVertexAlpha);
+                bakeRegion(faceliftAlpha, FACELIFT_OUTER_EYE_LEFT_INDICES, sizeof(FACELIFT_OUTER_EYE_LEFT_INDICES) / sizeof(FACELIFT_OUTER_EYE_LEFT_INDICES[0]), 1.0f);
+                bakeRegion(faceliftAlpha, FACELIFT_OUTER_EYE_RIGHT_INDICES, sizeof(FACELIFT_OUTER_EYE_RIGHT_INDICES) / sizeof(FACELIFT_OUTER_EYE_RIGHT_INDICES[0]), 1.0f);
+                bakeRegion(faceliftAlpha, FACELIFT_MOUTH_LEFT_INDICES, sizeof(FACELIFT_MOUTH_LEFT_INDICES) / sizeof(FACELIFT_MOUTH_LEFT_INDICES[0]), 0.6f);
+                bakeRegion(faceliftAlpha, FACELIFT_MOUTH_RIGHT_INDICES, sizeof(FACELIFT_MOUTH_RIGHT_INDICES) / sizeof(FACELIFT_MOUTH_RIGHT_INDICES[0]), 0.6f);
+                // Full 4-zone facelift technique (2026-07-31, TAMO research) — pinch
+                // (inner eye -> nose side) at primary strength like the outer-eye zone;
+                // cheek hollow (ear -> mouth -> nose) at secondary strength like the
+                // mouth-corner zone, since it's the more auxiliary/blend-in zone of the
+                // technique.
+                bakeRegion(faceliftAlpha, FACELIFT_PINCH_LEFT_INDICES, sizeof(FACELIFT_PINCH_LEFT_INDICES) / sizeof(FACELIFT_PINCH_LEFT_INDICES[0]), 1.0f, 2.6f);
+                bakeRegion(faceliftAlpha, FACELIFT_PINCH_RIGHT_INDICES, sizeof(FACELIFT_PINCH_RIGHT_INDICES) / sizeof(FACELIFT_PINCH_RIGHT_INDICES[0]), 1.0f, 2.6f);
+                bakeRegion(faceliftAlpha, FACELIFT_CHEEK_HOLLOW_LEFT_INDICES, sizeof(FACELIFT_CHEEK_HOLLOW_LEFT_INDICES) / sizeof(FACELIFT_CHEEK_HOLLOW_LEFT_INDICES[0]), 0.6f);
+                bakeRegion(faceliftAlpha, FACELIFT_CHEEK_HOLLOW_RIGHT_INDICES, sizeof(FACELIFT_CHEEK_HOLLOW_RIGHT_INDICES) / sizeof(FACELIFT_CHEEK_HOLLOW_RIGHT_INDICES[0]), 0.6f);
+
+                bakeRegion(alarAlpha, ALAR_BASE_LEFT_INDICES, sizeof(ALAR_BASE_LEFT_INDICES) / sizeof(ALAR_BASE_LEFT_INDICES[0]), 1.0f);
+                bakeRegion(alarAlpha, ALAR_BASE_RIGHT_INDICES, sizeof(ALAR_BASE_RIGHT_INDICES) / sizeof(ALAR_BASE_RIGHT_INDICES[0]), 1.0f);
+
                 glEnableVertexAttribArray(gCtx.mkAlphaHandle);
+
+                glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, underEyeAlpha);
+                glColorMask(GL_TRUE, GL_FALSE, GL_FALSE, GL_FALSE);
                 glDrawElements(GL_TRIANGLES, numIndices, GL_UNSIGNED_SHORT, MESH_INDICES);
+
+                glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, faceliftAlpha);
+                glColorMask(GL_FALSE, GL_TRUE, GL_FALSE, GL_FALSE);
+                glDrawElements(GL_TRIANGLES, numIndices, GL_UNSIGNED_SHORT, MESH_INDICES);
+
+                glVertexAttribPointer(gCtx.mkAlphaHandle, 1, GL_FLOAT, GL_FALSE, 0, alarAlpha);
+                glColorMask(GL_FALSE, GL_FALSE, GL_TRUE, GL_FALSE);
+                glDrawElements(GL_TRIANGLES, numIndices, GL_UNSIGNED_SHORT, MESH_INDICES);
+
+                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
             }
             glDisableVertexAttribArray(gCtx.mkPositionHandle);
             glDisableVertexAttribArray(gCtx.mkAlphaHandle);
@@ -1866,8 +2006,10 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeDrawSyncFrame(
     glUniform4fv(gCtx.fndLipstickColorHandle, 1, gCtx.lipstickColor);
     glUniform1i(gCtx.fndLipstickFinishHandle, gCtx.lipstickFinish);
     glUniform1f(gCtx.fndLipstickGlossinessHandle, gCtx.lipstickGlossiness);
-    glUniform4fv(gCtx.fndConcealerColorHandle, 1, gCtx.concealerColor);
-    glUniform1i(gCtx.fndConcealerStyleHandle, gCtx.concealerStyle);
+    glUniform4fv(gCtx.fndConcealerTraditionalColorHandle, 1, gCtx.concealerTraditionalColor);
+    glUniform4fv(gCtx.fndConcealerFaceliftColorHandle, 1, gCtx.concealerFaceliftColor);
+    glUniform4fv(gCtx.fndConcealerGreenColorHandle, 1, gCtx.concealerGreenColor);
+    glUniform4fv(gCtx.fndConcealerPeachColorHandle, 1, gCtx.concealerPeachColor);
     glUniform1f(gCtx.fndAmbientCctHandle, gCtx.ambientCctKelvin);
     glUniform1f(gCtx.fndAmbientIntensityHandle, gCtx.ambientIntensity);
     glUniform1f(gCtx.fndShowMakeupHandle, gCtx.showMakeup);
@@ -1902,8 +2044,14 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeSetMakeup(JNIEnv* env, jclass c
         gCtx.contourColor[0] = r; gCtx.contourColor[1] = g; gCtx.contourColor[2] = b; gCtx.contourColor[3] = a;
     } else if (regionType == 5) { // Highlight
         gCtx.highlightColor[0] = r; gCtx.highlightColor[1] = g; gCtx.highlightColor[2] = b; gCtx.highlightColor[3] = a;
-    } else if (regionType == 6) { // Concealer
-        gCtx.concealerColor[0] = r; gCtx.concealerColor[1] = g; gCtx.concealerColor[2] = b; gCtx.concealerColor[3] = a;
+    } else if (regionType == 6) { // Concealer: Traditional
+        gCtx.concealerTraditionalColor[0] = r; gCtx.concealerTraditionalColor[1] = g; gCtx.concealerTraditionalColor[2] = b; gCtx.concealerTraditionalColor[3] = a;
+    } else if (regionType == 7) { // Concealer: Facelift
+        gCtx.concealerFaceliftColor[0] = r; gCtx.concealerFaceliftColor[1] = g; gCtx.concealerFaceliftColor[2] = b; gCtx.concealerFaceliftColor[3] = a;
+    } else if (regionType == 8) { // Concealer: Green corrector
+        gCtx.concealerGreenColor[0] = r; gCtx.concealerGreenColor[1] = g; gCtx.concealerGreenColor[2] = b; gCtx.concealerGreenColor[3] = a;
+    } else if (regionType == 9) { // Concealer: Peach corrector
+        gCtx.concealerPeachColor[0] = r; gCtx.concealerPeachColor[1] = g; gCtx.concealerPeachColor[2] = b; gCtx.concealerPeachColor[3] = a;
     }
 }
 
@@ -1960,11 +2108,6 @@ Java_com_matchandbeauty_FizgravityRenderer_nativeSetAmbientLighting(JNIEnv* env,
 JNIEXPORT void JNICALL
 Java_com_matchandbeauty_FizgravityRenderer_nativeSetShowMakeup(JNIEnv* env, jclass clazz, jfloat value) {
     gCtx.showMakeup = value;
-}
-
-JNIEXPORT void JNICALL
-Java_com_matchandbeauty_FizgravityRenderer_nativeSetConcealerStyle(JNIEnv* env, jclass clazz, jint style) {
-    gCtx.concealerStyle = style;
 }
 
 JNIEXPORT void JNICALL

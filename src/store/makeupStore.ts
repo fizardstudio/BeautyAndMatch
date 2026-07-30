@@ -11,9 +11,21 @@ export interface MakeupState {
   foundationBlur: number;
   foundationType: 'matte' | 'dewy' | 'sheer' | 'satin' | 'luminous';
 
-  concealerColor: string;
-  concealerOpacity: number;
-  concealerStyle: 'traditional' | 'facelift' | 'corrector_green' | 'corrector_peach';
+  // Concealer: 4 independent, simultaneously-active layers (2026-07-30 rework) —
+  // not a mutually exclusive style picker. Real concealer/corrector routines layer
+  // several of these on different spots of the face at once (e.g. Peach on dark
+  // circles + Green on nose redness + Traditional blended over everything), and
+  // the previous single-style model lost whatever was picked before whenever the
+  // user switched styles. Traditional/Facelift each carry their own shade since
+  // they can legitimately want different colors (e.g. brightening under the eyes
+  // vs a darker sculpting shade at the lift zones); Green/Peach are fixed-color
+  // correctors (opacity-only) matching how real correctors work.
+  concealerTraditionalColor: string;
+  concealerTraditionalOpacity: number;
+  concealerFaceliftColor: string;
+  concealerFaceliftOpacity: number;
+  concealerGreenOpacity: number;
+  concealerPeachOpacity: number;
 
   blushColor: string;
   blushOpacity: number;
@@ -47,7 +59,7 @@ export interface MakeupState {
 
   // Setters
   setFoundation: (settings: Partial<Pick<MakeupState, 'foundationColor' | 'foundationOpacity' | 'foundationBlur' | 'foundationType'>>) => void;
-  setConcealer: (settings: Partial<Pick<MakeupState, 'concealerColor' | 'concealerOpacity' | 'concealerStyle'>>) => void;
+  setConcealer: (settings: Partial<Pick<MakeupState, 'concealerTraditionalColor' | 'concealerTraditionalOpacity' | 'concealerFaceliftColor' | 'concealerFaceliftOpacity' | 'concealerGreenOpacity' | 'concealerPeachOpacity'>>) => void;
   setBlush: (settings: Partial<Pick<MakeupState, 'blushColor' | 'blushOpacity' | 'blushStyle'>>) => void;
   setContour: (settings: Partial<Pick<MakeupState, 'contourColor' | 'contourIntensity' | 'contourStyle'>>) => void;
   setLipstick: (settings: Partial<Pick<MakeupState, 'lipstickColor' | 'lipstickGlossiness' | 'lipstickOpacity' | 'lipstickFinish'>>) => void;
@@ -65,9 +77,12 @@ const initialMakeup = {
   foundationBlur: 0.0,
   foundationType: 'matte' as const,
 
-  concealerColor: '#00000000',
-  concealerOpacity: 0.0,
-  concealerStyle: 'traditional' as const,
+  concealerTraditionalColor: '#00000000',
+  concealerTraditionalOpacity: 0.0,
+  concealerFaceliftColor: '#00000000',
+  concealerFaceliftOpacity: 0.0,
+  concealerGreenOpacity: 0.0,
+  concealerPeachOpacity: 0.0,
 
   blushColor: '#00000000',
   blushOpacity: 0.0,

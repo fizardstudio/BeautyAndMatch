@@ -27,6 +27,10 @@ function hexToRGBA(hex: string, alpha: number): [number, number, number, number]
 
 const foundationTypes = ['matte', 'dewy', 'sheer', 'satin', 'luminous'] as const;
 const lipstickFinishes = ['matte', 'satin', 'glossy', 'sheer', 'shimmer'] as const;
+// Green/Peach correctors are opacity-only layers (no shade picker) — real
+// correctors come in one standard cancel-color per type, not a palette.
+const CONCEALER_GREEN_COLOR = '#78B58D';
+const CONCEALER_PEACH_COLOR = '#FFB085';
 
 function hexToRGBTuple(hex: string): [number, number, number] {
   return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
@@ -330,6 +334,21 @@ const StylePill = ({ title, selected, onPress }: any) => (
   </TouchableOpacity>
 );
 
+// Accordion header for one Concealer layer — tap to show/hide its full controls
+// below. Purely a UI-visibility toggle: the layer keeps applying in the AR preview
+// at its current opacity regardless of whether it's expanded here (see
+// expandedConcealerLayer's own comment). dotColor is fixed for Green/Peach
+// (real correctors are one standard color, not a palette) or the user's picked
+// shade for Traditional/Facelift.
+const ConcealerLayerHeader = ({ title, dotColor, opacity, expanded, onPress }: any) => (
+  <TouchableOpacity style={styles.concealerLayerHeader} onPress={onPress} activeOpacity={0.8}>
+    <View style={[styles.correctorDot, { backgroundColor: dotColor === '#00000000' ? 'transparent' : dotColor }, dotColor === '#00000000' && styles.swatchClear]} />
+    <Text style={styles.concealerLayerTitle}>{title}</Text>
+    <Text style={styles.concealerLayerPct}>{Math.round(opacity * 100)}%</Text>
+    <Text style={styles.concealerLayerChevron}>{expanded ? '▲' : '▼'}</Text>
+  </TouchableOpacity>
+);
+
 const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
   const arViewRef = useRef<any>(null);
   const [hasPermission, setHasPermission] = useState(false);
@@ -355,6 +374,16 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
   useEffect(() => {
     if (activeCategory !== 'foundation') setFoundationPadOpen(false);
   }, [activeCategory]);
+  // Which of Concealer's 4 layers currently shows its full controls (accordion —
+  // only one expanded at a time, keeping the panel compact). This is PURELY which
+  // layer's CONTROLS are visible, not which layer is active in the render — all 4
+  // (Traditional/Facelift/Green/Peach) keep applying simultaneously in the AR
+  // preview regardless of which one is expanded here, since that's real store
+  // state now, not a mutually exclusive style selector.
+  const [expandedConcealerLayer, setExpandedConcealerLayer] = useState<'traditional' | 'facelift' | 'green' | 'peach' | null>(null);
+  useEffect(() => {
+    if (activeCategory !== 'concealer') setExpandedConcealerLayer(null);
+  }, [activeCategory]);
   // Real measured height of the bottom dock (icons row + its own padding), NOT a
   // guessed constant — the category panel's position is derived from this so it can
   // never visually/touch-overlap the dock regardless of device nav-bar insets. 78 is
@@ -374,7 +403,7 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
   const state = useMakeupStore();
   const {
     foundationColor, foundationOpacity, foundationBlur, foundationType,
-    concealerColor, concealerOpacity, concealerStyle,
+    concealerTraditionalColor, concealerTraditionalOpacity, concealerFaceliftColor, concealerFaceliftOpacity, concealerGreenOpacity, concealerPeachOpacity,
     lipstickColor, lipstickOpacity, lipstickFinish, lipstickGlossiness, blushColor, blushOpacity, blushStyle,
     contourColor, contourIntensity, contourStyle,
     eyeshadowColor, eyeshadowOpacity,
@@ -448,11 +477,6 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
     opacity: isScanning ? 1 : 0
   };
 
-  const concealerStyleInt =
-    concealerStyle === 'facelift' ? 1 :
-      concealerStyle === 'corrector_green' ? 2 :
-        concealerStyle === 'corrector_peach' ? 3 : 0;
-
   const toggleCategory = (cat: 'foundation' | 'concealer' | 'contour' | 'blush' | 'lipstick') => {
     setActiveCategory(activeCategory === cat ? null : cat);
   };
@@ -467,7 +491,10 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
         makeupFoundation={hexToRGBA(foundationColor, foundationOpacity)}
         makeupLipstick={hexToRGBA(lipstickColor, lipstickOpacity)}
         makeupBlush={hexToRGBA(blushColor, blushOpacity)}
-        makeupConcealer={hexToRGBA(concealerColor, concealerOpacity)}
+        makeupConcealerTraditional={hexToRGBA(concealerTraditionalColor, concealerTraditionalOpacity)}
+        makeupConcealerFacelift={hexToRGBA(concealerFaceliftColor, concealerFaceliftOpacity)}
+        makeupConcealerGreen={hexToRGBA(CONCEALER_GREEN_COLOR, concealerGreenOpacity)}
+        makeupConcealerPeach={hexToRGBA(CONCEALER_PEACH_COLOR, concealerPeachOpacity)}
         makeupEyeshadow={hexToRGBA(eyeshadowColor, eyeshadowOpacity)}
         makeupContour={hexToRGBA(contourColor, contourIntensity)}
         makeupHighlight={hexToRGBA('#FFF5E6', contourIntensity > 0 ? 0.35 : 0)}
@@ -475,7 +502,6 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
         makeupBlushStyle={blushStyle === 'normal' ? 0 : blushStyle === 'contour_45' ? 1 : 2}
         makeupFoundationType={foundationType === 'dewy' ? 1 : foundationType === 'sheer' ? 2 : foundationType === 'satin' ? 3 : foundationType === 'luminous' ? 4 : 0}
         makeupFoundationBlur={foundationBlur}
-        makeupConcealerStyle={concealerStyleInt}
         makeupLipstickFinish={lipstickFinish === 'satin' ? 1 : lipstickFinish === 'glossy' ? 2 : lipstickFinish === 'sheer' ? 3 : lipstickFinish === 'shimmer' ? 4 : 0}
         makeupLipstickGlossiness={lipstickGlossiness}
         showMakeup={compareMode ? showMakeupValue : 1.0}
@@ -611,19 +637,66 @@ const TryOnScreen = ({ onBack }: TryOnScreenProps) => {
 
                 {activeCategory === 'concealer' && (
                   <>
-                    <Text style={styles.pickerLabel}>STYLE</Text>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.swatchScroll}>
-                      <StylePill title="Traditional" selected={concealerStyle === 'traditional'} onPress={() => setConcealer({ concealerStyle: 'traditional' })} />
-                      <StylePill title="Facelift" selected={concealerStyle === 'facelift'} onPress={() => setConcealer({ concealerStyle: 'facelift' })} />
-                      <StylePill title="Green" selected={concealerStyle === 'corrector_green'} onPress={() => setConcealer({ concealerStyle: 'corrector_green', concealerColor: '#78B58D', concealerOpacity: 0.6 })} />
-                      <StylePill title="Peach" selected={concealerStyle === 'corrector_peach'} onPress={() => setConcealer({ concealerStyle: 'corrector_peach', concealerColor: '#FFB085', concealerOpacity: 0.6 })} />
-                    </ScrollView>
-
-                    {(concealerStyle === 'traditional' || concealerStyle === 'facelift') && (
-                      <ColorPicker label="SHADE" colors={['#00000000', '#F2C9A8', '#E8B894', '#DDAA82', '#C89570', '#B98262']} selectedColor={concealerColor} onSelect={(c: string) => { setConcealer({ concealerColor: c }); if (c !== '#00000000' && concealerOpacity === 0) setConcealer({ concealerOpacity: 0.6 }); }} />
+                    {/* 4 independent layers, all can be active at once (2026-07-30
+                        rework) — real concealer/corrector routines layer several of
+                        these on different spots of the face at the same time
+                        (Peach on dark circles + Green on nose redness + Traditional
+                        blended over everything), not a single mutually exclusive
+                        style. Each layer's own Coverage slider IS its on/off — 0%
+                        means that layer isn't applied at all. Accordion (only one
+                        section's full controls shown at a time) keeps the panel from
+                        towering over the camera preview the way showing all 4 in
+                        full at once did — collapsing/expanding is UI-only, every
+                        layer keeps rendering regardless of which is expanded. */}
+                    <ConcealerLayerHeader
+                      title="TRADITIONAL"
+                      dotColor={concealerTraditionalColor}
+                      opacity={concealerTraditionalOpacity}
+                      expanded={expandedConcealerLayer === 'traditional'}
+                      onPress={() => setExpandedConcealerLayer(expandedConcealerLayer === 'traditional' ? null : 'traditional')}
+                    />
+                    {expandedConcealerLayer === 'traditional' && (
+                      <>
+                        <ColorPicker label="SHADE" colors={['#00000000', '#F2C9A8', '#E8B894', '#DDAA82', '#C89570', '#B98262']} selectedColor={concealerTraditionalColor} onSelect={(c: string) => { setConcealer({ concealerTraditionalColor: c }); if (c !== '#00000000' && concealerTraditionalOpacity === 0) setConcealer({ concealerTraditionalOpacity: 0.6 }); }} />
+                        <GlassSlider label="Coverage" min={0} max={1} value={concealerTraditionalOpacity} onChange={(v: any) => setConcealer({ concealerTraditionalOpacity: v })} />
+                      </>
                     )}
 
-                    <GlassSlider label="Coverage" min={0} max={1} value={concealerOpacity} onChange={(v: any) => setConcealer({ concealerOpacity: v })} />
+                    <ConcealerLayerHeader
+                      title="FACELIFT"
+                      dotColor={concealerFaceliftColor}
+                      opacity={concealerFaceliftOpacity}
+                      expanded={expandedConcealerLayer === 'facelift'}
+                      onPress={() => setExpandedConcealerLayer(expandedConcealerLayer === 'facelift' ? null : 'facelift')}
+                    />
+                    {expandedConcealerLayer === 'facelift' && (
+                      <>
+                        <ColorPicker label="SHADE" colors={['#00000000', '#F2C9A8', '#E8B894', '#DDAA82', '#C89570', '#B98262']} selectedColor={concealerFaceliftColor} onSelect={(c: string) => { setConcealer({ concealerFaceliftColor: c }); if (c !== '#00000000' && concealerFaceliftOpacity === 0) setConcealer({ concealerFaceliftOpacity: 0.6 }); }} />
+                        <GlassSlider label="Coverage" min={0} max={1} value={concealerFaceliftOpacity} onChange={(v: any) => setConcealer({ concealerFaceliftOpacity: v })} />
+                      </>
+                    )}
+
+                    <ConcealerLayerHeader
+                      title="GREEN — kemerahan (hidung)"
+                      dotColor={CONCEALER_GREEN_COLOR}
+                      opacity={concealerGreenOpacity}
+                      expanded={expandedConcealerLayer === 'green'}
+                      onPress={() => setExpandedConcealerLayer(expandedConcealerLayer === 'green' ? null : 'green')}
+                    />
+                    {expandedConcealerLayer === 'green' && (
+                      <GlassSlider label="Coverage" min={0} max={1} value={concealerGreenOpacity} onChange={(v: any) => setConcealer({ concealerGreenOpacity: v })} />
+                    )}
+
+                    <ConcealerLayerHeader
+                      title="PEACH — mata panda (bawah mata)"
+                      dotColor={CONCEALER_PEACH_COLOR}
+                      opacity={concealerPeachOpacity}
+                      expanded={expandedConcealerLayer === 'peach'}
+                      onPress={() => setExpandedConcealerLayer(expandedConcealerLayer === 'peach' ? null : 'peach')}
+                    />
+                    {expandedConcealerLayer === 'peach' && (
+                      <GlassSlider label="Coverage" min={0} max={1} value={concealerPeachOpacity} onChange={(v: any) => setConcealer({ concealerPeachOpacity: v })} />
+                    )}
                   </>
                 )}
 
@@ -1224,6 +1297,43 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     opacity: 0.85,
     textTransform: 'uppercase',
+  },
+  correctorDot: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.4)',
+  },
+  concealerLayerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 10,
+  },
+  concealerLayerTitle: {
+    flex: 1,
+    color: THEME.textLight,
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 0.6,
+    opacity: 0.9,
+    textTransform: 'uppercase',
+  },
+  concealerLayerPct: {
+    color: THEME.roseQuartz,
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
+  concealerLayerChevron: {
+    color: THEME.taupeMist,
+    fontSize: 11,
   },
   swatchScroll: {
     gap: 10,
