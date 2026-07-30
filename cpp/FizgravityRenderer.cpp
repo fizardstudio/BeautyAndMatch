@@ -388,26 +388,37 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             vec3 foundationEffect = origColor.rgb;
             
             if (uFoundationType == 0) {
-                vec3 coveredSkin = litFoundation;
-                foundationEffect = coveredSkin + (highFreq * 0.40 * hfMultiplier);
+                // Retuned against docs/blueprint dictionary spec: High-Freq Treatment
+                // is Bilateral Blur, retaining 50% pori-pori — was 0.40, raised to 0.50.
+                // Spec's matte formula also includes a small "anti-chalky desaturation"
+                // step (mix(matteAlbedo, vec3(luma), 0.05)) to avoid a flat/chalky look
+                // at high opacity — litFoundation's own luma modulation isn't the same
+                // mechanism, so this is added explicitly here.
+                vec3 matteLuma = vec3(dot(litFoundation, vec3(0.299, 0.587, 0.114)));
+                vec3 coveredSkin = mix(litFoundation, matteLuma, 0.05);
+                foundationEffect = coveredSkin + (highFreq * 0.50 * hfMultiplier);
             } else if (uFoundationType == 1) {
                 vec3 coveredSkin = mix(blurred, litFoundation, 0.65);
                 foundationEffect = coveredSkin + (highFreq * 0.80 * hfMultiplier);
-                
+
                 float tZoneSuppression = smoothstep(0.12, 0.38, abs(vFaceUV.x - 0.5));
                 float highPointMask = smoothstep(0.35, 0.75, skinLuma) * tZoneSuppression;
-                
+
                 vec3 lightDir = normalize(vec3(0.2, 0.4, 0.8));
                 vec3 viewDir = vec3(0.0, 0.0, 1.0);
                 vec3 halfVector = normalize(lightDir + viewDir);
                 vec3 fauxNormal = normalize(vec3((vFaceUV.x - 0.5) * 1.5, (vFaceUV.y - 0.5) * 1.5, 0.8));
-                
+
                 float specAngle = max(0.0, dot(fauxNormal, halfVector));
-                float wetSpecular = pow(specAngle, 24.0) * 0.5 * highPointMask;
+                // Spec: Dewy Specular intensity 0.60-0.85 — was 0.5 (below range, read as
+                // too subtle/dry for a "wet film" dewy finish). Raised to 0.7.
+                float wetSpecular = pow(specAngle, 24.0) * 0.7 * highPointMask;
                 foundationEffect = blendScreen(foundationEffect, vec3(wetSpecular));
             } else if (uFoundationType == 2) {
+                // Spec: Sheer/Light coverage Opacity AR 0.20-0.40 — was 0.45 (above the
+                // spec's own upper bound). Lowered to 0.30 (middle of range).
                 vec3 sheerTarget = blendSoftLight(blurred, tintedFoundationColor);
-                vec3 coveredSkin = mix(blurred, sheerTarget, 0.45);
+                vec3 coveredSkin = mix(blurred, sheerTarget, 0.30);
                 foundationEffect = coveredSkin + (highFreq * 0.95 * hfMultiplier);
             } else if (uFoundationType == 3) {
                 vec3 softLightTarget = blendSoftLight(blurred, tintedFoundationColor);
@@ -425,7 +436,19 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
                 vec3 adaptivePearl = mix(vec3(1.0, 0.92, 0.82), tintedFoundationColor, 0.35);
                 foundationEffect = blendScreen(foundationEffect, adaptivePearl * pearlGlow);
             }
-            
+
+            // Ashiness prevention (dark skin, Fitzpatrick IV-VI) per dictionary spec:
+            // opacity cap + warmth injection above already existed and matched spec
+            // (darkBlend threshold 0.38, cap 0.65, warmth ~0.04/0.015 vs spec's
+            // 0.05/0.02), but the spec ALSO calls for the blend MODE itself to shift
+            // to Soft Light for dark skin ("blendMode = SOFT_LIGHT // Ganti dari NORMAL
+            // ke SOFT_LIGHT") — that half was missing; every finish type still used its
+            // own blend regardless of darkBlend. Blending toward a soft-light version
+            // (not fully replacing — 0.5 weight keeps some of the finish's own
+            // character rather than making every finish look identical on dark skin).
+            vec3 darkSkinSoftLight = blendSoftLight(blurred, tintedFoundationColor);
+            foundationEffect = mix(foundationEffect, darkSkinSoftLight, darkBlend * 0.5);
+
             // Final composite: blend the foundation color effect onto the currentSkin (which may already be smoothed)
             currentSkin = mix(currentSkin, foundationEffect, effectiveOpacity * foundationMask);
 
@@ -501,24 +524,34 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
             // the mouth's width) and lipLowerWeight (0 upper / 1 lower lip) — so the
             // highlight can be centered at one (u, mask) point with a real 2D radius,
             // gated to the lower lip where a real specular highlight usually sits.
+            // Every highlight/glitter term below multiplies by uLipstickColor.a (color
+            // opacity) as well as lipAlpha (geometric coverage) and uLipstickGlossiness
+            // (shine slider) — confirmed missing on-device: with NO lipstick color
+            // selected (opacity 0 / "no lipstick"), the base tint above correctly
+            // vanished (it already multiplies by uLipstickColor.a), but every highlight/
+            // sparkle term only used lipAlpha and glossiness, so a shine/glitter effect
+            // kept showing on the real bare lips regardless of whether any lipstick was
+            // actually "on". lipColorAlpha below is just a short alias for the same
+            // uLipstickColor.a value already used above, added to every term.
+            float lipColorAlpha = uLipstickColor.a;
             if (uLipstickFinish == 1) { // Satin: wide, dim, soft-edged sheen
                 vec2 d = vec2(lipU - 0.5, lipMask - 0.7) / vec2(0.32, 0.35);
                 float highlight = pow(clamp(1.0 - dot(d, d), 0.0, 1.0), 1.5) * lipLowerWeight;
-                currentSkin += vec3(highlight * 0.35 * uLipstickGlossiness * lipAlpha);
+                currentSkin += vec3(highlight * 0.35 * uLipstickGlossiness * lipAlpha * lipColorAlpha);
                 // Secondary highlight: smaller, dimmer, near the cupid's bow (upper lip
                 // center, close to the outer/vermilion edge rather than deep inside) —
                 // reference photos show a smaller catchlight there alongside the main
                 // lower-lip one, not just a single spot.
                 vec2 dCupid = vec2(lipU - 0.5, lipMask - 0.3) / vec2(0.12, 0.15);
                 float cupidHighlight = pow(clamp(1.0 - dot(dCupid, dCupid), 0.0, 1.0), 2.0) * (1.0 - lipLowerWeight);
-                currentSkin += vec3(cupidHighlight * 0.15 * uLipstickGlossiness * lipAlpha);
+                currentSkin += vec3(cupidHighlight * 0.15 * uLipstickGlossiness * lipAlpha * lipColorAlpha);
             } else if (uLipstickFinish == 2) { // Glossy: tight, bright, sharp-edged specular
                 vec2 d = vec2(lipU - 0.5, lipMask - 0.75) / vec2(0.18, 0.22);
                 float highlight = pow(clamp(1.0 - dot(d, d), 0.0, 1.0), 3.0) * lipLowerWeight;
-                currentSkin += vec3(highlight * 0.7 * uLipstickGlossiness * lipAlpha);
+                currentSkin += vec3(highlight * 0.7 * uLipstickGlossiness * lipAlpha * lipColorAlpha);
                 vec2 dCupid = vec2(lipU - 0.5, lipMask - 0.3) / vec2(0.10, 0.12);
                 float cupidHighlight = pow(clamp(1.0 - dot(dCupid, dCupid), 0.0, 1.0), 3.0) * (1.0 - lipLowerWeight);
-                currentSkin += vec3(cupidHighlight * 0.35 * uLipstickGlossiness * lipAlpha);
+                currentSkin += vec3(cupidHighlight * 0.35 * uLipstickGlossiness * lipAlpha * lipColorAlpha);
             } else if (uLipstickFinish == 4) { // Shimmer: glitter texture, tiled across the lip
                 // Tile counts are unequal on purpose — same reasoning as every earlier
                 // procedural attempt: the lip's outer->inner "band" (mask axis) is much
@@ -552,7 +585,7 @@ static const char* COMPOSITING_FRAGMENT_SHADER = R"(
                 // benar benar terhalang"). This cap holds even at the sliders' maximum,
                 // not just at their default — the sliders still control overall sparkle
                 // strength below that ceiling.
-                float sparkleIntensity = sparkle * uLipstickGlossiness * lipAlpha;
+                float sparkleIntensity = sparkle * uLipstickGlossiness * lipAlpha * lipColorAlpha;
                 currentSkin = mix(currentSkin, vec3(1.0), sparkleIntensity * 0.5);
             }
 
@@ -773,7 +806,34 @@ extern "C" {
 JNIEXPORT void JNICALL
 Java_com_matchandbeauty_FizgravityRenderer_nativeInitGL(JNIEnv* env, jclass clazz) {
     LOGI("nativeInitGL called");
-    
+
+    // gCtx is a single process-wide global — it survives the Activity/View lifecycle
+    // entirely, but the EGL context does NOT: navigating away from and back to the AR
+    // screen destroys the old GLSurfaceView (and its EGL context) and creates a new
+    // one, calling nativeInitGL again. Every existing FBO's cached width/height still
+    // holds its value from the FIRST init, and since the screen dimensions are
+    // typically unchanged on reopen, FBO::setup()'s `if (width==w && height==h)
+    // return;` guard sees a "match" and skips recreating the texture/framebuffer —
+    // leaving them pointing at GL object IDs that belonged to the now-destroyed old
+    // context (invalid in the new one). Confirmed on-device: buka AR preview, back ke
+    // Home, buka lagi -> camera preview blank hitam, while the camera/MediaPipe
+    // pipeline (a separate, non-GL path) kept working fine, confirming this was a
+    // stale-GL-object bug, not a camera lifecycle bug. Forcing every FBO's cached
+    // size back to 0 here makes the setup() calls in the nativeResize that follows
+    // unconditionally recreate fresh objects in the new context.
+    gCtx.maskFbo.width = 0; gCtx.maskFbo.height = 0;
+    gCtx.maskBlurFbo.width = 0; gCtx.maskBlurFbo.height = 0;
+    gCtx.mainFbo.width = 0; gCtx.mainFbo.height = 0;
+    gCtx.lipMaskFbo.width = 0; gCtx.lipMaskFbo.height = 0;
+    gCtx.eyeMaskFbo.width = 0; gCtx.eyeMaskFbo.height = 0;
+    gCtx.concealerMaskFbo.width = 0; gCtx.concealerMaskFbo.height = 0;
+    // Same issue for the glitter texture — nativeLoadGlitterTexture only calls
+    // glGenTextures if glitterTexture == 0, so it must be reset here too (Kotlin's
+    // onSurfaceCreated calls loadGlitterTexture() right after this, so it will get
+    // freshly recreated in the new context).
+    gCtx.glitterTexture = 0;
+
+
     // Camera Shader
     gCtx.cameraProgram = createProgram(CAMERA_VERTEX_SHADER, CAMERA_FRAGMENT_SHADER);
     gCtx.camPositionHandle = glGetAttribLocation(gCtx.cameraProgram, "aPosition");
